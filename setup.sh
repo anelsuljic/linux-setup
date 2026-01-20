@@ -17,3 +17,6 @@ bash setups/setup-proglang/setup-proglang.sh
 
 echo "Creating simbolic links ..."
 bash setups/setup-simlinks/setup-simlinks.sh
+
+echo "Adjusting timezone ..."
+bash setups/setup-time/setup-time.sh
