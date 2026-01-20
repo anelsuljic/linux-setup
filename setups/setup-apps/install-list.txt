@@ -1,0 +1,6 @@
+bleachbit
+brave-bin
+kompare
+obsidian
+swi-prolog
+visual-studio-code-bin

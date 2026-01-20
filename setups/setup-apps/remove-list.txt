@@ -1,0 +1,14 @@
+decibels
+epiphany
+gnome-calendar
+gnome-characters
+gnome-clocks
+gnome-connections
+gnome-contacts
+gnome-font-viewer
+gnome-maps
+gnome-music
+gnome-weather
+showtime
+simple-scan
+snapshot

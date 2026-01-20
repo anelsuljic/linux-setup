@@ -8,7 +8,7 @@ INSTALL_LIST_TMP="$HOME/linux-setup/setups/setup-apps/install-list.tmp"
 REMOVE_LIST="$HOME/linux-setup/setups/setup-apps/remove-list.txt"
 REMOVE_LIST_TMP="$HOME/linux-setup/setups/setup-apps/remove-list.tmp"
 
-install() {
+install_pkg() {
     for pkg in "$@"; do                 
         if pacman -Si "$pkg" > /dev/null 2>&1 || \
            yay -Si "$pkg" > /dev/null 2>&1; then
@@ -39,7 +39,7 @@ install() {
     sort -u -o "$INSTALL_LIST" "$INSTALL_LIST"
 }
 
-remove() {
+remove_pkg() {
     for pkg in "$@"; do
         if sudo pacman -Rns --noconfirm "$pkg" > /dev/null 2>&1 || \
            yay -Rns --noconfirm "$pkg" > /dev/null 2>&1; then
