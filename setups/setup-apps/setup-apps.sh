@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Define paths to your lists
-INSTALL_LIST="$HOME/linux-setup/setups/setup-apps/install-list.txt"
-REMOVE_LIST="$HOME/linux-setup/setups/setup-apps/remove-list.txt"
+INSTALL_LIST="$HOME/git-repos/linux-setup/setups/setup-apps/install-list.txt"
+REMOVE_LIST="$HOME/git-repos/linux-setup/setups/setup-apps/remove-list.txt"
 
 echo "--- Starting System Restoration ---"
 
