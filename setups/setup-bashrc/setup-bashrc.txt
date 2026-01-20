@@ -1,0 +1,79 @@
+
+
+
+# Installation and removal of packages
+
+INSTALL_LIST="$HOME/linux-setup/setups/setup-apps/install-list.txt"
+INSTALL_LIST_TMP="$HOME/linux-setup/setups/setup-apps/install-list.tmp"
+REMOVE_LIST="$HOME/linux-setup/setups/setup-apps/remove-list.txt"
+REMOVE_LIST_TMP="$HOME/linux-setup/setups/setup-apps/remove-list.tmp"
+
+install() {
+    for pkg in "$@"; do                 
+        if pacman -Si "$pkg" > /dev/null 2>&1 || \
+           yay -Si "$pkg" > /dev/null 2>&1; then
+
+            if pacman -Si "$pkg" > /dev/null 2>&1; then
+                sudo pacman -S --needed --noconfirm "$pkg"
+            else
+                yay -S --needed --noconfirm "$pkg"
+            fi
+            
+            if [ $? -eq 0 ]; then
+                echo "Installation of $pkg succeeded."
+                echo "$pkg" >> "$INSTALL_LIST"
+                
+                if [ -f "$REMOVE_LIST" ]; then
+                    grep -vxf <(echo "$pkg") "$REMOVE_LIST" > \
+                                             "$REMOVE_LIST_TMP"
+                    cat "$REMOVE_LIST_TMP" > "$REMOVE_LIST"
+                    rm -rf "$REMOVE_LIST_TMP"
+                fi
+            else
+                echo "Error: installation of $pkg failed."
+            fi
+        else
+            echo "Error: $pkg doesn't exist in pacman and yay."
+        fi
+    done
+    sort -u -o "$INSTALL_LIST" "$INSTALL_LIST"
+}
+
+remove() {
+    for pkg in "$@"; do
+        if sudo pacman -Rns --noconfirm "$pkg" > /dev/null 2>&1 || \
+           yay -Rns --noconfirm "$pkg" > /dev/null 2>&1; then
+            
+            echo "Successfully removed $pkg."
+            echo "$pkg" >> "$REMOVE_LIST"
+            
+            if [ -f "$INSTALL_LIST" ]; then
+                grep -vxf <(echo "$pkg") "$INSTALL_LIST" > "$INSTALL_LIST_TMP" 
+                cat "$INSTALL_LIST_TMP" > "$INSTALL_LIST" 
+                rm -rf "$INSTALL_LIST_TMP"
+            fi
+        else
+            echo "Error: $pkg not found or could not be removed."
+        fi
+    done
+
+    [ -f "$REMOVE_LIST" ] && sort -u -o "$REMOVE_LIST" "$REMOVE_LIST"
+    [ -f "$INSTALL_LIST" ] && sort -u -o "$INSTALL_LIST" "$INSTALL_LIST"
+}
+
+
+# Cleaning aliases
+alias clean='clear && history -c && cat /dev/null > ~/.bash_history'
+alias cexit='history -c && cat /dev/null > ~/.bash_history && exit'
+alias creboot='history -c && cat /dev/null > ~/.bash_history && reboot'
+alias cpoweroff='history -c && cat /dev/null > ~/.bash_history && poweroff'
+
+
+# Programming aliases
+alias p1++='g++ -ansi -O2 -DNDEBUG -D_GLIBCXX_DEBUG -Wall -Wextra -Werror -Wno-sign-compare -Wshadow'
+alias p2++='g++ -D_GLIBCXX_DEBUG -O2 -Wall -Wextra -Werror -Wno-sign-compare -std=c++11'
+alias g17++='g++ -ansi -O2 -DNDEBUG -D_GLIBCXX_DEBUG -Wall -Wextra -Werror -Wno-sign-compare -Wshadow -std=c++17'
+
+
+# Directories
+DOCS=~/Documents/git-repos/documents
