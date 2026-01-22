@@ -1,5 +1,10 @@
 #!/bin/bash
 
+printf '\n\n\n\n\n%*s\n' 40 '' | tr ' ' '-'
+read -p "Do you want to set up git? [y/n]: " choice
+printf '%*s\n\n\n\n\n\n' 40 '' | tr ' ' '-'
+
+[[ "$choice" != "y" ]] && exit 0
 
 git config --global user.name "Anel Ademovic"
 git config --global user.email asuljic48@gmail.com
