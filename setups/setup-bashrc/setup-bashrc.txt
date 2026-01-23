@@ -3,10 +3,10 @@
 
 # Installation and removal of packages
 
-INSTALL_LIST="$HOME/linux-setup/setups/setup-apps/install-list.txt"
-INSTALL_LIST_TMP="$HOME/linux-setup/setups/setup-apps/install-list.tmp"
-REMOVE_LIST="$HOME/linux-setup/setups/setup-apps/remove-list.txt"
-REMOVE_LIST_TMP="$HOME/linux-setup/setups/setup-apps/remove-list.tmp"
+INSTALL_LIST="$HOME/<linux-setup-dir>/setups/setup-apps/install-list.txt"
+INSTALL_LIST_TMP="$HOME/<linux-setup-dir>/setups/setup-apps/install-list.tmp"
+REMOVE_LIST="$HOME/<linux-setup-dir>/setups/setup-apps/remove-list.txt"
+REMOVE_LIST_TMP="$HOME/<linux-setup-dir>/setups/setup-apps/remove-list.tmp"
 
 install_pkg() {
     for pkg in "$@"; do                 
@@ -74,6 +74,3 @@ alias p1++='g++ -ansi -O2 -DNDEBUG -D_GLIBCXX_DEBUG -Wall -Wextra -Werror -Wno-s
 alias p2++='g++ -D_GLIBCXX_DEBUG -O2 -Wall -Wextra -Werror -Wno-sign-compare -std=c++11'
 alias g17++='g++ -ansi -O2 -DNDEBUG -D_GLIBCXX_DEBUG -Wall -Wextra -Werror -Wno-sign-compare -Wshadow -std=c++17'
 
-
-# Directories
-DOCS=~/Documents/git-repos/documents
