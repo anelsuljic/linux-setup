@@ -17,3 +17,13 @@ To create custom shortcuts for gnome console, you must go to `Settings -> Keyboa
 - Create the shortcut for opening a new tab of gnome terminal:
     - Command: `kgx --tab`
     - Shortcut: `Ctrl + Alt + N`
+
+
+To customize grub look:
+
+1. Copy the theme folder you want (for example, `rog`) to `/boot/grub/themes`.
+2. Edit `/etc/default/grub` and add the following line after `GRUB_CMDLINE_LINUX`:
+    ```bash
+    GRUB_THEME=/boot/grub/themes/<theme_folder>/theme.txt
+    ```
+3. Execute the command `grub-mkconfig -o /boot/grub/grub.cfg`.
