@@ -1,6 +1,7 @@
 bleachbit
 brave-bin
 kompare
+man
 obsidian
 swi-prolog
 visual-studio-code-bin
