@@ -74,3 +74,6 @@ alias p1++='g++ -ansi -O2 -DNDEBUG -D_GLIBCXX_DEBUG -Wall -Wextra -Werror -Wno-s
 alias p2++='g++ -D_GLIBCXX_DEBUG -O2 -Wall -Wextra -Werror -Wno-sign-compare -std=c++11'
 alias g17++='g++ -ansi -O2 -DNDEBUG -D_GLIBCXX_DEBUG -Wall -Wextra -Werror -Wno-sign-compare -Wshadow -std=c++17'
 
+
+# VPNs
+alias vpn-upc='sudo openfortivpn myupclink.upc.edu:443 --saml-login'

@@ -3,5 +3,6 @@ brave-bin
 kompare
 man
 obsidian
+openfortivpn
 swi-prolog
 visual-studio-code-bin
