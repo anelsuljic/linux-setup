@@ -77,3 +77,15 @@ alias g17++='g++ -ansi -O2 -DNDEBUG -D_GLIBCXX_DEBUG -Wall -Wextra -Werror -Wno-
 
 # VPNs
 alias vpn-upc='sudo openfortivpn myupclink.upc.edu:443 --saml-login'
+
+
+# ANTLR4 setup
+if [ -z "${CLASSPATH}" ]; then
+    export CLASSPATH=".:/usr/share/java/antlr-4.13.2-complete.jar"
+else
+    export CLASSPATH=".:/usr/share/java/antlr-4.13.2-complete.jar:$CLASSPATH"
+fi
+
+alias antlr4='java -jar /usr/share/java/antlr-4.13.2-complete.jar'
+alias grun='java org.antlr.v4.gui.TestRig'
+

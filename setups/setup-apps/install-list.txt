@@ -1,5 +1,8 @@
+antlr4
+antlr4-runtime
 bleachbit
 brave-bin
+jdk-openjdk
 kompare
 man
 obsidian
