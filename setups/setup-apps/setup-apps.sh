@@ -1,4 +1,4 @@
-#!/bin/bash
+    #!/bin/bash
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 
@@ -26,3 +26,9 @@ if [ -f "$REMOVE_LIST" ]; then
 else
     echo "Warning: Remove list not found at $REMOVE_LIST"
 fi
+
+printf '\n\n\n\n\n%*s\n' 40 '' | tr ' ' '-'
+echo "Configuring apps ..."
+printf '%*s\n\n\n\n\n\n' 40 '' | tr ' ' '-'
+
+bash $SCRIPT_DIR/setup-gnome-zoom.sh
