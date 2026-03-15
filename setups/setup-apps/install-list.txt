@@ -13,4 +13,5 @@ texlive-doc
 texlive-lang
 texlive-meta
 visual-studio-code-bin
+xorg-xauth
 zip
