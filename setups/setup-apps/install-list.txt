@@ -13,5 +13,6 @@ texlive-doc
 texlive-lang
 texlive-meta
 visual-studio-code-bin
+vlc
 xorg-xauth
 zip
