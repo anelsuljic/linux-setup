@@ -7,7 +7,8 @@ ffmpeg
 jdk-openjdk
 kompare
 libva-utils
-man
+man-db
+man-pages
 noto-fonts-cjk
 noto-fonts-emoji
 noto-fonts-extra
@@ -19,7 +20,6 @@ texlive-lang
 texlive-meta
 visual-studio-code-bin
 vlc
-vlc-plugin-ffmpeg
 vlc-plugins-all
 xorg-xauth
 xorg-xhost
