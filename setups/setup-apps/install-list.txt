@@ -8,6 +8,9 @@ jdk-openjdk
 kompare
 libva-utils
 man
+noto-fonts-cjk
+noto-fonts-emoji
+noto-fonts-extra
 obsidian
 openfortivpn
 swi-prolog
@@ -19,4 +22,5 @@ vlc
 vlc-plugin-ffmpeg
 vlc-plugins-all
 xorg-xauth
+xorg-xhost
 zip
