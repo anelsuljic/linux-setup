@@ -21,6 +21,7 @@ texlive-meta
 visual-studio-code-bin
 vlc
 vlc-plugins-all
+wl-clipboard
 xorg-xauth
 xorg-xhost
 zip
