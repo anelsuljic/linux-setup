@@ -2,6 +2,8 @@ antlr4
 antlr4-runtime
 biber
 bleachbit
+bluez
+bluez-utils
 brave-bin
 ffmpeg
 jdk-openjdk
