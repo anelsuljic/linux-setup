@@ -2,15 +2,11 @@ antlr4
 antlr4-runtime
 biber
 bleachbit
-bluez
-bluez-utils
 brave-bin
 ffmpeg
 jdk-openjdk
 kompare
 libva-utils
-man-db
-man-pages
 noto-fonts-cjk
 noto-fonts-emoji
 noto-fonts-extra

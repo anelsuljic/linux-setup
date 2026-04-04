@@ -15,6 +15,9 @@ printf '%*s\n\n\n\n\n\n' 40 '' | tr ' ' '-'
 if [ -f "$INSTALL_LIST" ]; then
     echo "Step 1: Installing wanted packages..."
     yay -S --needed --noconfirm - < "$INSTALL_LIST"
+
+    echo "Marking packages as explicitly installed to prevent auto-removal..."
+    grep -v '^#' "$INSTALL_LIST" | sed '/^$/d' | xargs -r sudo pacman -D --asexplicit
 else
     echo "Warning: Install list not found at $INSTALL_LIST"
 fi
