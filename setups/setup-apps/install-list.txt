@@ -12,6 +12,7 @@ noto-fonts-emoji
 noto-fonts-extra
 obsidian
 openfortivpn
+ptyxis
 swi-prolog
 texlive-doc
 texlive-lang
