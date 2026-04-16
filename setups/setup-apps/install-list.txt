@@ -3,6 +3,7 @@ antlr4-runtime
 biber
 bleachbit
 brave-bin
+extension-manager
 ffmpeg
 jdk-openjdk
 kompare
