@@ -15,6 +15,8 @@ obsidian
 okular
 openfortivpn
 ptyxis
+python
+python-pip
 python-virtualenv
 swi-prolog
 texlive-doc
