@@ -11,6 +11,7 @@ libva-utils
 noto-fonts-cjk
 noto-fonts-emoji
 noto-fonts-extra
+numactl
 obsidian
 okular
 openfortivpn
