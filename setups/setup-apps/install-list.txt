@@ -6,8 +6,10 @@ brave-bin
 extension-manager
 ffmpeg
 jdk-openjdk
+kcachegrind
 kompare
 libva-utils
+linux-tools
 noto-fonts-cjk
 noto-fonts-emoji
 noto-fonts-extra
@@ -19,10 +21,12 @@ ptyxis
 python
 python-pip
 python-virtualenv
+strace
 swi-prolog
 texlive-doc
 texlive-lang
 texlive-meta
+valgrind
 vi
 vim
 visual-studio-code-bin
