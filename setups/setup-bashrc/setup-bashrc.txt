@@ -93,3 +93,7 @@ alias grun='java org.antlr.v4.gui.TestRig'
 # Gnome utilities setup
 alias gz-act-mouse='gsettings set org.gnome.desktop.a11y.magnifier mouse-tracking 'centered''
 alias gz-des-mouse='gsettings set org.gnome.desktop.a11y.magnifier mouse-tracking 'none''
+
+
+# Other aliases
+alias copy='wl-copy'
