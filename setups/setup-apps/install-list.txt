@@ -8,6 +8,7 @@ ffmpeg
 jdk-openjdk
 kcachegrind
 kompare
+libreoffice-fresh
 libva-utils
 linux-tools
 noto-fonts-cjk
