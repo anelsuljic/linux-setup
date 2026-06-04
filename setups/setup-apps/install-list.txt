@@ -27,8 +27,11 @@ python-virtualenv
 strace
 swi-prolog
 texlive-doc
+texlive-fontsrecommended
 texlive-lang
 texlive-meta
+ttf-liberation
+ttf-linux-libertine
 unzip
 valgrind
 vi
