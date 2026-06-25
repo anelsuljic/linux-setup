@@ -15,4 +15,4 @@ cat "$SETUP_BASH" >> "$BASHRC"
 source "$BASHRC"
 
 
-echo "Note: on section # Installation of packages from .bashrc, remember to update <linux-setup-dir> with the actual directory where the repository of linux setup is locally stored"
+echo "Note: on section # Installation and removal of packages from .bashrc, remember to update <linux-setup-dir> with the actual directory where the repository of linux setup is locally stored"

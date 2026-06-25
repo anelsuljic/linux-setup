@@ -5,6 +5,8 @@
 
 INSTALL_LIST="$HOME/<linux-setup-dir>/setups/setup-apps/install-list.txt"
 INSTALL_LIST_TMP="$HOME/<linux-setup-dir>/setups/setup-apps/install-list.tmp"
+REMOVE_LIST="$HOME/<linux-setup-dir>/setups/setup-apps/remove-list.txt"
+REMOVE_LIST_TMP="$HOME/<linux-setup-dir>/setups/setup-apps/remove-list.tmp"
 
 install_pkg() {
     for pkg in "$@"; do                 
@@ -20,6 +22,13 @@ install_pkg() {
             if [ $? -eq 0 ]; then
                 echo "Installation of $pkg succeeded."
                 echo "$pkg" >> "$INSTALL_LIST"
+                
+                if [ -f "$REMOVE_LIST" ]; then
+                    grep -vxf <(echo "$pkg") "$REMOVE_LIST" > \
+                                             "$REMOVE_LIST_TMP"
+                    cat "$REMOVE_LIST_TMP" > "$REMOVE_LIST"
+                    rm -rf "$REMOVE_LIST_TMP"
+                fi
             else
                 echo "Error: installation of $pkg failed."
             fi
@@ -28,6 +37,28 @@ install_pkg() {
         fi
     done
     sort -u -o "$INSTALL_LIST" "$INSTALL_LIST"
+}
+
+remove_pkg() {
+    for pkg in "$@"; do
+        if sudo pacman -Rns --noconfirm "$pkg" > /dev/null 2>&1 || \
+           yay -Rns --noconfirm "$pkg" > /dev/null 2>&1; then
+            
+            echo "Successfully removed $pkg."
+            echo "$pkg" >> "$REMOVE_LIST"
+            
+            if [ -f "$INSTALL_LIST" ]; then
+                grep -vxf <(echo "$pkg") "$INSTALL_LIST" > "$INSTALL_LIST_TMP" 
+                cat "$INSTALL_LIST_TMP" > "$INSTALL_LIST" 
+                rm -rf "$INSTALL_LIST_TMP"
+            fi
+        else
+            echo "Error: $pkg not found or could not be removed."
+        fi
+    done
+
+    [ -f "$REMOVE_LIST" ] && sort -u -o "$REMOVE_LIST" "$REMOVE_LIST"
+    [ -f "$INSTALL_LIST" ] && sort -u -o "$INSTALL_LIST" "$INSTALL_LIST"
 }
 
 
@@ -57,6 +88,11 @@ fi
 
 alias antlr4='java -jar /usr/share/java/antlr-4.13.2-complete.jar'
 alias grun='java org.antlr.v4.gui.TestRig'
+
+
+# Gnome utilities setup
+alias gz-act-mouse='gsettings set org.gnome.desktop.a11y.magnifier mouse-tracking 'centered''
+alias gz-des-mouse='gsettings set org.gnome.desktop.a11y.magnifier mouse-tracking 'none''
 
 
 # Other aliases
