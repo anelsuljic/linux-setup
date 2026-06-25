@@ -3,7 +3,6 @@ antlr4-runtime
 biber
 bleachbit
 brave-bin
-extension-manager
 ffmpeg
 jdk-openjdk
 kcachegrind
@@ -18,7 +17,6 @@ numactl
 obsidian
 okular
 openfortivpn
-ptyxis
 python
 python-chardet
 python-pip
