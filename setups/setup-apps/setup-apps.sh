@@ -21,11 +21,3 @@ if [ -f "$INSTALL_LIST" ]; then
 else
     echo "Warning: Install list not found at $INSTALL_LIST"
 fi
-
-
-if [ -f "$REMOVE_LIST" ]; then
-    echo "Step 2: Pruning unwanted packages..."
-    grep -v '^#' "$REMOVE_LIST" | xargs -r sudo pacman -Rns --noconfirm
-else
-    echo "Warning: Remove list not found at $REMOVE_LIST"
-fi
