@@ -6,6 +6,7 @@ brave-bin
 ffmpeg
 jdk-openjdk
 kcachegrind
+keychain
 kompare
 libreoffice-fresh
 libva-utils
