@@ -44,7 +44,7 @@ alias p2++='g++ -D_GLIBCXX_DEBUG -O2 -Wall -Wextra -Werror -Wno-sign-compare -st
 alias g17++='g++ -ansi -O2 -DNDEBUG -D_GLIBCXX_DEBUG -Wall -Wextra -Werror -Wno-sign-compare -Wshadow -std=c++17'
 
 # Autostart ssh
-eval $(keychain --eval --quiet <ssh-key-name>)
+# eval $(keychain --eval --quiet <ssh-key-name>)
 
 # VPNs
 alias vpn-upc='sudo openfortivpn myupclink.upc.edu:443 --saml-login'
