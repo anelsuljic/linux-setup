@@ -63,3 +63,23 @@ alias grun='java org.antlr.v4.gui.TestRig'
 
 # Other aliases
 alias copy='wl-copy'
+
+
+# ---- NVIDIA dGPU power (ASUS G513 hybrid) ----------------------------------
+# "Off" = PCI D3cold (~0W) via runtime PM. A firmware hard-disable can't run
+# while Hyprland holds the dGPU for HDMI, so D3cold is the real off.
+dgpu() {                # status
+    local d=/sys/bus/pci/devices/0000:01:00.0
+    printf 'dGPU: power=%s runtime=%s control=%s\n' \
+        "$(<"$d/power_state")" "$(<"$d/power/runtime_status")" "$(<"$d/power/control")"
+}
+dgpu-off() {            # run when you don't need the dGPU (no monitor, no GPU job)
+    local d=/sys/bus/pci/devices/0000:01:00.0
+    echo auto | sudo tee "$d/power/control" >/dev/null
+    sleep 4
+    if [ "$(<"$d/power_state")" = D3cold ]; then
+        echo "dGPU powered down (D3cold)."
+    else
+        echo "dGPU still on — an external display or a GPU job is using it (or give it a few seconds; recheck with 'dgpu')."
+    fi
+}
