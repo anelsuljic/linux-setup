@@ -11,6 +11,7 @@ kompare
 libreoffice-fresh
 libva-utils
 linux-tools
+mpv
 noto-fonts-cjk
 noto-fonts-emoji
 noto-fonts-extra
