@@ -1,0 +1,42 @@
+#!/bin/sh
+# Compositor for the SDDM Wayland greeter.
+#
+# Weston is deliberately not used: it opened this machine's ELAN I2C touchpad
+# (ASUE1403:00 04F3:319A) but never delivered a single event from it, so the
+# greeter never received pointer focus and therefore never set a cursor. The
+# missing pointer was a symptom of dead input, not of cursor rendering.
+# Hyprland drives the same touchpad correctly in the user session.
+
+# Mirror the user session's GPU preference: the AMD iGPU drives the internal
+# eDP panel and the NVIDIA dGPU stays dormant. Resolved by driver name rather
+# than a fixed card number, because DRM card numbering is not guaranteed to be
+# stable across boots and a wrong choice here means no login screen at all.
+amd=""
+other=""
+for dev in /dev/dri/card*; do
+    [ -e "$dev" ] || continue
+    node=${dev##*/}
+    driver=$(sed -n 's/^DRIVER=//p' "/sys/class/drm/$node/device/uevent" 2>/dev/null)
+    if [ "$driver" = "amdgpu" ]; then
+        amd="$amd $dev"
+    else
+        other="$other $dev"
+    fi
+done
+
+devices=""
+for dev in $amd $other; do
+    devices="${devices:+$devices:}$dev"
+done
+[ -n "$devices" ] && export AQ_DRM_DEVICES="$devices"
+
+# Hyprland's own default cursor. The greeter sets its own pointer image too,
+# via SDDM's CursorTheme/CursorSize.
+export XCURSOR_THEME=Bibata-Modern-Ice
+export XCURSOR_SIZE=32
+
+# Launched through start-hyprland rather than calling Hyprland directly, which
+# Hyprland warns against: start-hyprland supervises the compositor via a
+# watchdog and stays in the foreground as its parent, so SDDM can still track
+# and stop the process it spawned. Arguments after -- go to Hyprland.
+exec start-hyprland -- -c /etc/sddm/hyprland-greeter.lua
