@@ -129,9 +129,6 @@ EOF
     sudo tee /etc/sddm.conf.d/10-wayland.conf >/dev/null <<EOF
 [General]
 DisplayServer=wayland
-
-[Wayland]
-CompositorCommand=weston --shell=${WESTON_SHELL} --no-config
 EOF
   else
     warn "sddm not installed — skipping greeter config"
