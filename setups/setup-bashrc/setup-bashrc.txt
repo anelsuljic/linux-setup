@@ -44,7 +44,7 @@ alias g17++='g++ -ansi -O2 -DNDEBUG -D_GLIBCXX_DEBUG -Wall -Wextra -Werror -Wno-
 # --immediate skips keychain 3.x's "[ Press Enter to initialize keys ]"
 # coordination prompt. It reads /dev/tty (not stdin), so without it graphical
 # login stalls: SDDM's wayland-session sources this file via `bash --login`
-# before exec'ing Hyprland, leaving a blank screen until a key is pressed.
+# before executing Hyprland, leaving a blank screen until a key is pressed.
 # eval "$(keychain add --eval --quiet --immediate <ssh-key-name>)"
 
 # VPNs
