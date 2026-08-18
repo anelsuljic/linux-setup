@@ -52,6 +52,12 @@
 # ===========================================================================
 
 (
+  printf '\n\n\n\n\n%*s\n' 40 '' | tr ' ' '-'
+  read -p "Do you want to set up sddm? [y/n]: " choice
+  printf '%*s\n\n\n\n\n\n' 40 '' | tr ' ' '-'
+
+  [[ "$choice" != "y" ]] && exit 0
+  
   set -euo pipefail
 
   log()  { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -61,7 +67,7 @@
   [ "$(id -u)" -eq 0 ] && warn "Run this as your normal user, not root, or the cursor theme will be taken from /root."
 
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  SRC_DIR="$SCRIPT_DIR/sddm"
+  SRC_DIR="$SCRIPT_DIR/files"
   GREETER_CONF="/etc/sddm/hyprland-greeter.lua"
 
   # --- 0. Sanity checks ------------------------------------------------------
