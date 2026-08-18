@@ -1,13 +1,7 @@
--- Minimal Hyprland configuration for the SDDM greeter.
---
--- Runs as the `sddm` user. SDDM starts this compositor, waits for its Wayland
--- socket, then launches sddm-greeter-qt6 as an ordinary client. Weston was
--- replaced here because it opened this machine's ELAN I2C touchpad
--- (ASUE1403:00 04F3:319A) but never delivered a single event from it, so the
--- greeter never received pointer focus and therefore never set a cursor.
+-- Configuration of the greeter compositor, installed by setup-sddm.sh.
 
--- Scale 1: the greeter is sized for the full 2560x1440 panel, and SDDM's
--- CursorSize=32 is chosen to match that.
+-- Scale 1 because the greeter is sized for the whole 2560x1440 panel and the
+-- CursorSize of 20-cursor.conf is chosen to match it.
 hl.monitor({
     output   = "",
     mode     = "preferred",

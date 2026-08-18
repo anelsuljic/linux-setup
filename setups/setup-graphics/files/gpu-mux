@@ -1,0 +1,13 @@
+#!/bin/sh
+# Switches the hardware gpu mux. A reboot is needed after every change.
+
+set -e
+
+case "$1" in
+    ultimate|dgpu)  asusctl armoury set gpu_mux_mode 0
+                    echo "Mux set to ultimate, the dgpu drives everything. Reboot to apply it." ;;
+    hybrid|optimus) asusctl armoury set gpu_mux_mode 1
+                    echo "Mux set to hybrid, the igpu drives the panel. Reboot to apply it." ;;
+    status)         asusctl armoury get gpu_mux_mode ;;
+    *)              echo "usage: gpu-mux {ultimate|hybrid|status}"; exit 1 ;;
+esac
