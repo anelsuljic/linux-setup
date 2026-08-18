@@ -17,23 +17,26 @@
 # by setup-graphics.sh, so the body runs in a subshell to keep `set -e`/`exit`
 # from killing the parent shell.
 #
+# SDDM IS NOT CONFIGURED HERE. The Wayland drop-in and the greeter compositor
+# used to live in this script; they now belong to setups/setup-sddm/setup-sddm.sh,
+# which owns everything about the login screen. The only thing the greeter takes
+# from here is the GPU policy, and it re-derives that itself at runtime.
+#
 # === LESSONS FROM A MANUAL RUN — do NOT "simplify" these away ===============
 #  1. AQ_DRM_DEVICES is COLON-separated. A /dev/dri/by-path value (its PCI
 #     address contains ':') gets split into garbage -> "Found no gpus" -> Hyprland
 #     crashes at CBackend::create(). We use the colon-free /dev/dri/cardN nodes,
 #     auto-detected by PCI vendor.
-#  2. weston >= 15 REMOVED fullscreen-shell.so. The SDDM Wayland greeter must use
-#     kiosk-shell.so, or weston exits instantly and the greeter crash-loops.
-#  3. The dGPU runtime-PM udev "bind" rule NEVER fires: nvidia is loaded from the
+#  2. The dGPU runtime-PM udev "bind" rule NEVER fires: nvidia is loaded from the
 #     initramfs, so the bind event happens before /etc udev rules exist. Use a
 #     systemd-tmpfiles entry (runs in the real root) to set power/control=auto.
-#  4. The HDMI port is on the dGPU, so Hyprland must manage BOTH GPUs (AMD first)
+#  3. The HDMI port is on the dGPU, so Hyprland must manage BOTH GPUs (AMD first)
 #     or it cannot drive the external screen. With both listed + control=auto the
 #     dGPU still reaches D3cold when undocked.
-#  5. fbdev=1 is fine (it does NOT pin the GPU); D3cold was blocked only by #3.
-#  6. The Vulkan ICD filename varies (radeon_icd.json vs radeon_icd.x86_64.json,
+#  4. fbdev=1 is fine (it does NOT pin the GPU); D3cold was blocked only by #2.
+#  5. The Vulkan ICD filename varies (radeon_icd.json vs radeon_icd.x86_64.json,
 #     depending on multilib). Detect it instead of hardcoding.
-#  7. CONSEQUENCE OF #4: once Hyprland manages both GPUs, connector names such as
+#  6. CONSEQUENCE OF #3: once Hyprland manages both GPUs, connector names such as
 #     `eDP-1` are NO LONGER STABLE ACROSS BOOTS, so monitor rules must not use
 #     them. The kernel's connector suffix (drm connector_type_id) comes from a
 #     counter SHARED BY ALL DRM DEVICES, handed out in driver-registration order
@@ -47,7 +50,7 @@
 #     A `monitor=eDP-1,...` rule therefore lands on the dead connector every
 #     other boot and the panel comes up at its preferred mode / scale 1. Match on
 #     the EDID description instead (`monitor=desc:<make> <model>,...`), which is
-#     tied to the physical display. §9 below checks for this and prints the exact
+#     tied to the physical display. §8 below checks for this and prints the exact
 #     replacement rule.
 # ===========================================================================
 
@@ -80,8 +83,8 @@
   # --- 1. Packages -----------------------------------------------------------
   # All official (extra) -> plain pacman, no AUR/yay needed. nvidia-open is the
   # recommended branch for Turing+ (Ampere). DKMS covers every installed kernel.
-  log "Installing NVIDIA stack + AMD Vulkan (RADV) + weston"
-  PKGS=(nvidia-open-dkms nvidia-utils nvidia-prime vulkan-radeon weston)
+  log "Installing NVIDIA stack + AMD Vulkan (RADV)"
+  PKGS=(nvidia-open-dkms nvidia-utils nvidia-prime vulkan-radeon)
   for k in linux linux-lts linux-zen linux-hardened; do
     pacman -Qq "$k" >/dev/null 2>&1 && PKGS+=("${k}-headers") || true
   done
@@ -123,7 +126,7 @@ EOF
   sudo systemctl enable nvidia-suspend.service nvidia-resume.service nvidia-hibernate.service \
     || warn "some nvidia-*.service units were missing (continuing)"
 
-  # --- 5. dGPU runtime PM via tmpfiles (see lesson #3) -----------------------
+  # --- 5. dGPU runtime PM via tmpfiles (see lesson #2) -----------------------
   log "Enabling dGPU runtime power management (control=auto via tmpfiles)"
   DGPU_AUDIO="${DGPU_PCI%.*}.1"   # HDMI-audio function of the dGPU
   sudo tee /etc/tmpfiles.d/nvidia-runtime-pm.conf >/dev/null <<EOF
@@ -135,22 +138,7 @@ w /sys/bus/pci/devices/${DGPU_AUDIO}/power/control - - - - auto
 EOF
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/nvidia-runtime-pm.conf || true
 
-  # --- 6. SDDM Wayland greeter (weston) --------------------------------------
-  if pacman -Qq sddm >/dev/null 2>&1; then
-    # weston >=15 dropped fullscreen-shell.so; kiosk-shell is its replacement.
-    WESTON_SHELL="kiosk-shell.so"
-    [ -e "/usr/lib/weston/${WESTON_SHELL}" ] || WESTON_SHELL="desktop-shell.so"
-    log "Configuring SDDM Wayland greeter (weston --shell=${WESTON_SHELL})"
-    sudo install -d /etc/sddm.conf.d
-    sudo tee /etc/sddm.conf.d/10-wayland.conf >/dev/null <<EOF
-[General]
-DisplayServer=wayland
-EOF
-  else
-    warn "sddm not installed — skipping greeter config"
-  fi
-
-  # --- 7. gpu-run / gpu-mux helpers ------------------------------------------
+  # --- 6. gpu-run / gpu-mux helpers ------------------------------------------
   log "Installing gpu-run / gpu-mux into /usr/local/bin"
   sudo tee /usr/local/bin/gpu-run >/dev/null <<'EOF'
 #!/bin/sh
@@ -178,7 +166,7 @@ esac
 EOF
   sudo chmod +x /usr/local/bin/gpu-run /usr/local/bin/gpu-mux
 
-  # --- 8. Hyprland GPU environment (per-user) --------------------------------
+  # --- 7. Hyprland GPU environment (per-user) --------------------------------
   # Default Vulkan/VA-API to AMD so apps never wake the dGPU; pin the compositor
   # to the AMD iGPU but keep the NVIDIA dGPU in the list so it can drive HDMI.
   RADEON_ICD=""   # join all radeon ICDs (handles multilib 32-bit) with ':'; avoid `ls` (may be aliased)
@@ -213,7 +201,7 @@ EOF
     warn "  env = LIBVA_DRIVER_NAME,radeonsi"
   fi
 
-  # --- 9. Guard: monitor rules pinned to connector names (see lesson #7) -----
+  # --- 8. Guard: monitor rules pinned to connector names (see lesson #6) -----
   # Managing both GPUs (needed for HDMI) makes `eDP-N` names alternate between
   # boots. Anything that pins a monitor by name breaks on half of them, so flag
   # it and hand the user the description-based rule to paste in its place.
@@ -241,7 +229,7 @@ EOF
     warn "These files pin a monitor rule to an 'eDP-N' connector name:"
     printf '%s\n' "$OFFENDERS" | sed 's/^/          /'
     warn "That name alternates between boots now that Hyprland manages both GPUs"
-    warn "(lesson #7 at the top of this script). Match the panel by description:"
+    warn "(lesson #6 at the top of this script). Match the panel by description:"
     if [ -n "$PANEL_DESC" ]; then
       printf '          monitor=desc:%s,<mode>,<position>,<scale>\n' "$PANEL_DESC"
       printf '          hl.monitor({ output = "desc:%s", ... })   -- Lua form\n' "$PANEL_DESC"
@@ -265,7 +253,8 @@ EOF
     * external HDMI display    : plug it in (Hyprland manages it live)
     * full dGPU (gaming/dock)  : gpu-mux ultimate   (then reboot; gpu-mux hybrid to return)
 
-  If the login screen ever breaks: switch to a TTY (Ctrl+Alt+F2) and run
-    sudo rm /etc/sddm.conf.d/10-wayland.conf && sudo systemctl restart sddm
+  The login screen is not touched by this script: run
+  setups/setup-sddm/setup-sddm.sh for the greeter, and see its header for the
+  recovery steps if it ever breaks.
 EOF
 ) || printf '\n\033[1;31msetup-graphics-rog.sh failed (see messages above).\033[0m\n'

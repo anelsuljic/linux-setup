@@ -2,14 +2,25 @@
 #
 # setup-sddm.sh
 # ---------------------------------------------------------------------------
-# SDDM greeter fix for the ASUS ROG Strix G513 (AMD Radeon 680M iGPU +
-# NVIDIA RTX 3070 Ti dGPU) on Arch + Hyprland (Wayland, SDDM, ml4w/HyprMod).
+# THE one place where SDDM is configured, for the ASUS ROG Strix G513 (AMD
+# Radeon 680M iGPU + NVIDIA RTX 3070 Ti dGPU) on Arch + Hyprland (Wayland,
+# SDDM, ml4w/HyprMod). setup-graphics-rog.sh used to write the Wayland drop-in
+# and pull in weston; both moved here, so the login screen can be changed,
+# verified and rolled back without touching the GPU setup.
 #
-# PROBLEM: with the SDDM Wayland greeter running under weston (as configured by
-# setup-graphics-rog.sh section 6), the ELAN I2C touchpad
-# (ASUE1403:00 04F3:319A) is opened by weston but never emits a single event.
-# The greeter therefore never gets pointer focus and never sets a cursor, so the
-# login screen shows NO MOUSE POINTER and does not react to the touchpad at all.
+# What it installs:
+#   10-wayland.conf      -> /etc/sddm.conf.d   DisplayServer=wayland
+#   20-cursor.conf       -> /etc/sddm.conf.d   cursor theme/size + greeter env
+#   30-compositor.conf   -> /etc/sddm.conf.d   greeter compositor = sddm-hyprland
+#   sddm-hyprland        -> /usr/local/bin     GPU + cursor env, execs Hyprland
+#   hyprland-greeter.lua -> /etc/sddm          the greeter's own Hyprland config
+#   weston               (package)             fallback compositor, recovery only
+#
+# PROBLEM: with the SDDM Wayland greeter running under weston (SDDM's shipped
+# default, `weston --shell=kiosk`), the ELAN I2C touchpad (ASUE1403:00
+# 04F3:319A) is opened by weston but never emits a single event. The greeter
+# therefore never gets pointer focus and never sets a cursor, so the login
+# screen shows NO MOUSE POINTER and does not react to the touchpad at all.
 # Typing still works, because the keyboard you type on is a different device
 # (AT Translated Set 2 keyboard, event3).
 #
@@ -18,8 +29,8 @@
 # explicit cursor theme it can actually read.
 #
 # Run it as your NORMAL USER (it calls sudo where needed). It is idempotent and
-# ASSUMES AN EXISTING SDDM SETUP (sddm installed, DisplayServer=wayland already
-# configured by setup-graphics-rog.sh). It only ADDS/overrides files.
+# ASSUMES SDDM IS ALREADY INSTALLED (ml4w/HyprMod pulls it in and writes
+# /etc/sddm.conf). It only ADDS/overrides files.
 #
 # === LESSONS FROM A LONG DEBUG SESSION — do NOT "simplify" these away =======
 #  1. The missing pointer was NEVER a rendering bug. Cursor theme, Qt greeter and
@@ -27,27 +38,35 @@
 #     commits a valid 32x32 ARGB cursor via wl_pointer.set_cursor and hover/click
 #     work. It is dead INPUT: no pointer motion -> no wl_pointer.enter -> the
 #     client never sets a cursor. Do NOT go chasing XCURSOR_*/cursor planes.
-#  2. 30-compositor.conf beats 10-wayland.conf (written by setup-graphics-rog.sh)
-#     ONLY BY SORT ORDER, since both set [Wayland] CompositorCommand. Keep the
-#     30- prefix. If that drop-in ever disappears, weston returns and the
-#     touchpad dies again -- that is the first place to look.
-#  3. AQ_DRM_DEVICES must be set for the GREETER too, AMD first, or Hyprland may
+#  2. CONFIG PRECEDENCE, per sddm.conf(5): /usr/lib/sddm/sddm.conf.d/*.conf,
+#     then /etc/sddm.conf.d/*.conf, then /etc/sddm.conf -- THE LAST ONE READ
+#     WINS. So 30-compositor.conf beats sddm's shipped default.conf
+#     (CompositorCommand=weston --shell=kiosk), and within /etc/sddm.conf.d the
+#     higher number wins: keep the 30- prefix. Beware /etc/sddm.conf: ml4w owns
+#     that file and every key it sets silently overrides the drop-ins installed
+#     here -- §4 flags the overlap. If 30-compositor.conf ever disappears,
+#     weston is back and the touchpad is dead again: look there first.
+#  3. weston >= 15 REMOVED fullscreen-shell.so, and a greeter pointed at it exits
+#     instantly and crash-loops. sddm 0.21 ships `--shell=kiosk`, which is what
+#     makes the recovery at the end of this script (delete 30-compositor.conf)
+#     land on a working -- if cursor-less -- greeter. §4 warns if that changes.
+#  4. AQ_DRM_DEVICES must be set for the GREETER too, AMD first, or Hyprland may
 #     try to drive the panel from the dormant NVIDIA dGPU and you get no login
 #     screen. Colon-separated /dev/dri/cardN nodes only -- never /dev/dri/by-path
 #     (see setup-graphics-rog.sh lesson #1). sddm-hyprland resolves this at
 #     runtime by DRIVER NAME, because card numbering is not stable across boots.
-#  4. Launch via `start-hyprland -- -c <config>`, never `Hyprland` directly:
+#  5. Launch via `start-hyprland -- -c <config>`, never `Hyprland` directly:
 #     Hyprland warns about it, and start-hyprland stays in the FOREGROUND as the
 #     watchdog parent, which is exactly what SDDM needs to track and stop the
 #     compositor when you log in. A launcher that forked away would break SDDM.
-#  5. The greeter config MUST be .lua. The classic .conf format is deprecated in
+#  6. The greeter config MUST be .lua. The classic .conf format is deprecated in
 #     Hyprland 0.56 and produces a warning overlay ON THE LOGIN SCREEN. Note the
 #     Lua API uses underscores (input.touchpad.tap_to_click), not tap-to-click.
-#  6. Bibata lives in ~/.local/share/icons, which the `sddm` user CANNOT read.
+#  7. Bibata lives in ~/.local/share/icons, which the `sddm` user CANNOT read.
 #     It must be copied to /usr/share/icons or the greeter silently falls back to
 #     the default theme. /usr/local/share/icons does NOT work: it is not on the
 #     Xcursor search path.
-#  7. Never `systemctl restart sddm` to test -- it kills the running session.
+#  8. Never `systemctl restart sddm` to test -- it kills the running session.
 #     Log out instead; SDDM restarts the greeter on its own.
 # ===========================================================================
 
@@ -57,7 +76,7 @@
   printf '%*s\n\n\n\n\n\n' 40 '' | tr ' ' '-'
 
   [[ "$choice" != "y" ]] && exit 0
-  
+
   set -euo pipefail
 
   log()  { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -77,15 +96,19 @@
   command -v start-hyprland >/dev/null 2>&1 \
     || die "start-hyprland not found — the greeter wrapper needs it (package: hyprland)."
 
-  # DisplayServer=wayland normally comes from 10-wayland.conf (setup-graphics-rog.sh).
-  if ! grep -rqs '^DisplayServer=wayland' /etc/sddm.conf /etc/sddm.conf.d/ 2>/dev/null; then
-    warn "DisplayServer=wayland is not configured (usually set by setup-graphics-rog.sh)."
-    warn "Without it SDDM starts an X11 greeter and this compositor config is ignored."
-  fi
+  # --- 1. Fallback compositor ------------------------------------------------
+  # weston does NOT run the greeter here — replacing it is the whole point of
+  # this script — but SDDM falls back to it as soon as 30-compositor.conf is
+  # gone, which is the documented way to recover a broken login screen. It used
+  # to be installed by setup-graphics-rog.sh; it belongs with the greeter.
+  log "Installing weston (SDDM's fallback greeter compositor, for recovery only)"
+  sudo pacman -S --needed --noconfirm weston \
+    || warn "could not install weston — the recovery fallback at the end of this script would not work."
 
-  # --- 1. Install the files into their corresponding paths -------------------
-  # Format: "<file in sddm/>|<destination>|<mode>"
+  # --- 2. Install the files into their corresponding paths -------------------
+  # Format: "<file in files/>|<destination>|<mode>"
   FILES=(
+    "10-wayland.conf|/etc/sddm.conf.d/10-wayland.conf|644"
     "20-cursor.conf|/etc/sddm.conf.d/20-cursor.conf|644"
     "30-compositor.conf|/etc/sddm.conf.d/30-compositor.conf|644"
     "hyprland-greeter.lua|${GREETER_CONF}|644"
@@ -108,9 +131,9 @@
     printf '    %-40s -> %s (%s)\n' "$name" "$dest" "$mode"
   done
 
-  # --- 2. Cursor theme, readable by the `sddm` user --------------------------
+  # --- 3. Cursor theme, readable by the `sddm` user --------------------------
   # 20-cursor.conf names a theme; it must exist under /usr/share/icons, because
-  # the greeter runs as `sddm` and cannot read $HOME (lesson #6).
+  # the greeter runs as `sddm` and cannot read $HOME (lesson #7).
   CURSOR_THEME="$(sed -n 's/^CursorTheme=//p' "$SRC_DIR/20-cursor.conf" | head -n1)"
   if [ -n "$CURSOR_THEME" ]; then
     if [ -d "/usr/share/icons/$CURSOR_THEME" ]; then
@@ -126,7 +149,7 @@
     fi
   fi
 
-  # --- 3. Verify -------------------------------------------------------------
+  # --- 4. Verify -------------------------------------------------------------
   log "Verifying the greeter config parses"
   if Hyprland --verify-config -c "$GREETER_CONF" 2>&1 | grep -q 'config ok'; then
     printf '    %s: config ok\n' "$GREETER_CONF"
@@ -135,14 +158,47 @@
     warn "Fix it before logging out, or you will get no login screen (recovery below)."
   fi
 
-  # Warn if something still points the greeter at weston (lesson #2).
-  if grep -rqs 'CompositorCommand=.*weston' /etc/sddm.conf /etc/sddm.conf.d/ 2>/dev/null; then
-    printf '    weston CompositorCommand still present in a lower drop-in (expected: 10-wayland.conf);\n'
-    printf '    30-compositor.conf overrides it by sort order.\n'
+  # /etc/sddm.conf is read AFTER every drop-in and therefore wins (lesson #2).
+  # ml4w owns that file, so a key it happens to set silently overrides what was
+  # just installed. Report the overlap rather than rewriting somebody else's file.
+  if [ -f /etc/sddm.conf ]; then
+    CLASHES=""
+    for src in "$SRC_DIR"/*.conf; do
+      while IFS='=' read -r key ours; do
+        theirs="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=//p" /etc/sddm.conf | tail -n1)"
+        if [ -n "$theirs" ] && [ "$theirs" != "$ours" ]; then
+          CLASHES="${CLASHES}      ${key}= (from $(basename "$src")) -> /etc/sddm.conf wins with '${theirs}'\n"
+        fi
+      done < <(grep -E '^[A-Za-z][A-Za-z0-9]*=' "$src")
+    done
+    if [ -n "$CLASHES" ]; then
+      warn "/etc/sddm.conf has the highest precedence and overrides settings installed here:"
+      printf '%b' "$CLASHES"
+      warn "Delete those keys from /etc/sddm.conf, or fold their values into files/*.conf."
+    fi
   fi
 
+  # The recovery below lands on sddm's own compositor command; make sure that is
+  # still a shell weston actually ships (lesson #3).
+  # `|| true`: pipefail is on, and grep exits non-zero when the file or the key
+  # is absent, which would abort the whole script over a purely informative check.
+  FALLBACK="$(grep -hs '^[[:space:]]*CompositorCommand=' /usr/lib/sddm/sddm.conf.d/*.conf | tail -n1 || true)"
+  FALLBACK="${FALLBACK#*=}"
+  case "$FALLBACK" in
+    *fullscreen-shell*)
+      warn "SDDM's fallback compositor is '$FALLBACK', but weston >= 15 dropped"
+      warn "fullscreen-shell.so — that fallback would crash-loop instead of letting"
+      warn "you log in. Add /etc/sddm.conf.d/25-weston-fallback.conf containing:"
+      warn "    [Wayland]"
+      warn "    CompositorCommand=weston --shell=kiosk-shell.so"
+      ;;
+    *)
+      printf '    weston fallback: %s\n' "${FALLBACK:-sddm built-in default}"
+      ;;
+  esac
+
   # --- done ------------------------------------------------------------------
-  log "SDDM greeter setup complete."
+  log "SDDM setup complete."
   cat <<EOF
 
   Apply it by LOGGING OUT (not a reboot, and never 'systemctl restart sddm' —
@@ -153,7 +209,9 @@
 
   If the login screen ever breaks: switch to a TTY (Ctrl+Alt+F2) and run
     sudo rm /etc/sddm.conf.d/30-compositor.conf && sudo systemctl restart sddm
-  That falls back to weston — cursor-less and with a dead touchpad, but you can
-  still log in by typing your password.
+  That falls back to sddm's own weston greeter — cursor-less and with a dead
+  touchpad, but you can still log in by typing your password. If even that fails,
+  remove /etc/sddm.conf.d/10-wayland.conf as well and restart sddm: it then
+  starts the X11 greeter, which depends on none of this.
 EOF
 ) || printf '\n\033[1;31msetup-sddm.sh failed (see messages above).\033[0m\n'
