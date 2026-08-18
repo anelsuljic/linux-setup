@@ -14,8 +14,5 @@ read model
 if [[ $model == "1070ti" ]]; then
     yay -S --needed --noconfirm nvidia-580xx-dkms nvidia-580xx-utils nvidia-580xx-settings
 elif [[ $model == "3070ti" ]]; then
-    # yay -S --needed --noconfirm nvidia-open-dkms nvidia-utils nvidia-settings
     source $SCRIPT_DIR/setup-graphics-rog.sh
-else
-    echo "Installation skipped"
 fi
