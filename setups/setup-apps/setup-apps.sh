@@ -1,4 +1,4 @@
-    #!/bin/bash
+#!/bin/bash
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 
@@ -13,7 +13,7 @@ printf '%*s\n\n\n\n\n\n' 40 '' | tr ' ' '-'
 
 
 if [ -f "$INSTALL_LIST" ]; then
-    echo "Step 1: Installing wanted packages..."
+    echo "Installing wanted packages..."
     yay -S --needed --noconfirm - < "$INSTALL_LIST"
 
     echo "Marking packages as explicitly installed to prevent auto-removal..."
