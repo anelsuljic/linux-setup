@@ -15,6 +15,6 @@ cat "$SETUP_BASH" > "$BASHRC"
 source "$BASHRC"
 
 echo "Note 1: remember to change the name of your ssh key on section"\
-     "#Autostart ssh from .bashrc"
+     "\"# Autostart ssh\" from .bashrc_custom"
      
-echo "Note 2: on section # Installation of packages from .bashrc_custom, remember to update <linux-setup-dir> with the actual directory where the repository of linux setup is locally stored"
+echo "Note 2: on section \"# Installation of packages\" from .bashrc_custom, remember to update <linux-setup-dir> with the actual directory where the repository of linux setup is locally stored"

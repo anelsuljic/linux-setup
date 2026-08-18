@@ -1,4 +1,4 @@
-# Installation and removal of packages
+# Installation of packages
 
 INSTALL_LIST="$HOME/<linux-setup-dir>/setups/setup-apps/install-list.txt"
 INSTALL_LIST_TMP="$HOME/<linux-setup-dir>/setups/setup-apps/install-list.tmp"
