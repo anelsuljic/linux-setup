@@ -11,7 +11,7 @@ printf '%*s\n\n\n\n\n\n' 40 '' | tr ' ' '-'
 
 [[ "$choice" != "y" ]] && exit 0
 
-cat "$SETUP_BASH" >> "$BASHRC"
+cat "$SETUP_BASH" > "$BASHRC"
 source "$BASHRC"
 
 echo "Note 1: remember to change the name of your ssh key on section"\

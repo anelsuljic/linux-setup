@@ -16,3 +16,8 @@ To customize grub look:
     GRUB_THEME=/boot/grub/themes/<theme_folder>/theme.txt
     ```
 3. Execute the command `grub-mkconfig -o /boot/grub/grub.cfg`.
+
+Other readmes:
+
+- [Graphics setup](setups/setup-graphics/readme.md)
+- [SDDM setup](setups/setup-sddm/readme.md)
