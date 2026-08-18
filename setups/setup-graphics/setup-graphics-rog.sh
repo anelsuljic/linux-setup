@@ -33,6 +33,22 @@
 #  5. fbdev=1 is fine (it does NOT pin the GPU); D3cold was blocked only by #3.
 #  6. The Vulkan ICD filename varies (radeon_icd.json vs radeon_icd.x86_64.json,
 #     depending on multilib). Detect it instead of hardcoding.
+#  7. CONSEQUENCE OF #4: once Hyprland manages both GPUs, connector names such as
+#     `eDP-1` are NO LONGER STABLE ACROSS BOOTS, so monitor rules must not use
+#     them. The kernel's connector suffix (drm connector_type_id) comes from a
+#     counter SHARED BY ALL DRM DEVICES, handed out in driver-registration order
+#     -- nvidia's first DisplayPort shows up as `DP-6` because amdgpu already
+#     took DP-1..DP-5. Both GPUs expose an eDP connector (the dGPU's is the
+#     MUX'd-off panel link: permanently "disconnected" in hybrid mode, but it
+#     still consumes a number), and because §3 puts amdgpu AND nvidia_drm in the
+#     initramfs they probe concurrently, so the winner alternates between boots:
+#       amdgpu first -> real panel = eDP-1, dead nvidia link = eDP-2
+#       nvidia first -> dead nvidia link = eDP-1, real panel = eDP-2
+#     A `monitor=eDP-1,...` rule therefore lands on the dead connector every
+#     other boot and the panel comes up at its preferred mode / scale 1. Match on
+#     the EDID description instead (`monitor=desc:<make> <model>,...`), which is
+#     tied to the physical display. §9 below checks for this and prints the exact
+#     replacement rule.
 # ===========================================================================
 
 (
@@ -195,6 +211,48 @@ EOF
     warn "  env = AQ_DRM_DEVICES,${AQ}"
     warn "  env = VK_DRIVER_FILES,${RADEON_ICD}"
     warn "  env = LIBVA_DRIVER_NAME,radeonsi"
+  fi
+
+  # --- 9. Guard: monitor rules pinned to connector names (see lesson #7) -----
+  # Managing both GPUs (needed for HDMI) makes `eDP-N` names alternate between
+  # boots. Anything that pins a monitor by name breaks on half of them, so flag
+  # it and hand the user the description-based rule to paste in its place.
+  log "Checking Hyprland monitor rules for unstable connector names"
+  HYPR_DIR="$HOME/.config/hypr"
+  OFFENDERS=""
+  [ -d "$HYPR_DIR" ] && OFFENDERS=$(grep -rlE '^[^#-]*(monitor *= *eDP-[0-9]|output *= *"eDP-[0-9])' "$HYPR_DIR" 2>/dev/null || true)
+
+  if [ -n "$OFFENDERS" ]; then
+    # The panel's EDID description is stable; read it from a live session if we
+    # have one, else from the connected eDP connector on the AMD card.
+    PANEL_DESC=""
+    if command -v hyprctl >/dev/null 2>&1; then
+      PANEL_DESC=$(hyprctl monitors 2>/dev/null \
+        | awk '/description:/ { sub(/^[[:space:]]*description:[[:space:]]*/, ""); print; exit }' || true)
+    fi
+    if [ -z "$PANEL_DESC" ] && command -v edid-decode >/dev/null 2>&1; then
+      for c in /sys/class/drm/${IGPU_CARD}-eDP-*; do
+        [ -r "$c/edid" ] && [ "$(cat "$c/status" 2>/dev/null)" = "connected" ] || continue
+        PANEL_DESC=$(edid-decode <"$c/edid" 2>/dev/null | awk -F': ' '/Manufacturer|Display Product Name/ {print $2}' | paste -sd' ' || true)
+        break
+      done
+    fi
+
+    warn "These files pin a monitor rule to an 'eDP-N' connector name:"
+    printf '%s\n' "$OFFENDERS" | sed 's/^/          /'
+    warn "That name alternates between boots now that Hyprland manages both GPUs"
+    warn "(lesson #7 at the top of this script). Match the panel by description:"
+    if [ -n "$PANEL_DESC" ]; then
+      printf '          monitor=desc:%s,<mode>,<position>,<scale>\n' "$PANEL_DESC"
+      printf '          hl.monitor({ output = "desc:%s", ... })   -- Lua form\n' "$PANEL_DESC"
+    else
+      warn "  (run 'hyprctl monitors' in a session to read the panel's description)"
+      printf '          monitor=desc:<make> <model>,<mode>,<position>,<scale>\n'
+    fi
+    warn "Put it in a file loaded AFTER monitors.lua (e.g. custom.lua) so it wins"
+    warn "and survives nwg-displays regenerating monitors.lua/monitors.conf."
+  else
+    log "No name-pinned monitor rules found (or no Hyprland config yet)."
   fi
 
   # --- done ------------------------------------------------------------------
