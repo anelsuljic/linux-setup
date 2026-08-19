@@ -4,6 +4,7 @@ biber
 bleachbit
 brave-bin
 ffmpeg
+impression
 jdk-openjdk
 kcachegrind
 keychain
