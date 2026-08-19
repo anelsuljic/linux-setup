@@ -21,3 +21,4 @@ Other readmes:
 
 - [Graphics setup](setups/setup-graphics/readme.md)
 - [SDDM setup](setups/setup-sddm/readme.md)
+- [Commands used](commands-used.md)
