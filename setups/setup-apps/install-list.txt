@@ -1,5 +1,6 @@
 antlr4
 antlr4-runtime
+arch-install-scripts
 biber
 bleachbit
 brave-bin
