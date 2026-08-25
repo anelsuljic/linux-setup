@@ -1,3 +1,4 @@
+7zip
 antlr4
 antlr4-runtime
 arch-install-scripts
