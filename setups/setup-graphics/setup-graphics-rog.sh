@@ -27,7 +27,7 @@ echo "Found the igpu on $IGPU_CARD and the dgpu on $DGPU_CARD."
 
 echo "Installing the nvidia drivers and the amd vulkan driver..."
 
-PACKAGES=(nvidia-open-dkms nvidia-utils nvidia-prime vulkan-radeon)
+PACKAGES=(nvidia-open-dkms nvidia-utils nvidia-prime vulkan-radeon vulkan-icd-loader)
 
 for kernel in linux linux-lts linux-zen linux-hardened; do
     pacman -Qq "$kernel" &> /dev/null && PACKAGES+=("$kernel-headers")
@@ -43,7 +43,8 @@ sudo tee /etc/modprobe.d/nvidia.conf > /dev/null << 'EOF'
 options nvidia_drm modeset=1 fbdev=1
 
 # Let the dgpu power off when it is idle and keep its memory across suspend.
-options nvidia NVreg_DynamicPowerManagement=0x02 NVreg_PreserveVideoMemoryAllocations=1
+# S0ix keeps it powered down during s2idle, the only sleep state of this laptop.
+options nvidia NVreg_DynamicPowerManagement=0x02 NVreg_PreserveVideoMemoryAllocations=1 NVreg_EnableS0ixPowerManagement=1
 EOF
 
 sudo tee /etc/modprobe.d/nouveau-blacklist.conf > /dev/null << 'EOF'
@@ -67,8 +68,12 @@ fi
 sudo mkinitcpio -P
 
 
-echo "Enabling the nvidia suspend services..."
+echo "Enabling the nvidia suspend services and the dynamic boost daemon..."
 sudo systemctl enable nvidia-suspend.service nvidia-resume.service nvidia-hibernate.service
+
+# nvidia-powerd shifts the power budget between the cpu and the dgpu, this
+# laptop reports notebook dynamic boost as supported.
+sudo systemctl enable --now nvidia-powerd.service
 
 
 echo "Enabling the runtime power management of the dgpu..."

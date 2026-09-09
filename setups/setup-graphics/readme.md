@@ -27,10 +27,10 @@ finishes.
 ### What it does
 
 1. Finds both gpus by their pci vendor, `0x1002` for amd and `0x10de` for nvidia.
-2. Installs `nvidia-open-dkms`, `nvidia-utils`, `nvidia-prime` and `vulkan-radeon`, plus the headers of every installed kernel. `nvidia-open` is the branch recommended for ampere cards and dkms rebuilds it for every kernel.
+2. Installs `nvidia-open-dkms`, `nvidia-utils`, `nvidia-prime`, `vulkan-radeon` and `vulkan-icd-loader`, plus the headers of every installed kernel. `nvidia-open` is the branch recommended for ampere cards and dkms rebuilds it for every kernel.
 3. Writes the kernel mode setting and power management options into `/etc/modprobe.d/nvidia.conf`, and blacklists nouveau.
 4. Puts both graphics drivers into the initramfs, drops the `kms` hook from `/etc/mkinitcpio.conf` and rebuilds it.
-5. Enables the nvidia suspend, resume and hibernate services.
+5. Enables the nvidia suspend, resume and hibernate services, and `nvidia-powerd` for the dynamic boost.
 6. Writes `/etc/tmpfiles.d/nvidia-runtime-pm.conf`, which lets the dgpu and its hdmi audio device power off when they are idle.
 7. Installs `files/gpu-run` and `files/gpu-mux` into `/usr/local/bin`.
 8. Writes the graphics environment of hyprland into `~/.config/hypr/conf/environments/default.lua`.
@@ -39,7 +39,7 @@ finishes.
 
 ```bash
 dgpu                                    # function of .bashrc_custom: D0 is awake, D3cold is asleep
-cat /proc/driver/nvidia/gpus/*/power    # the runtime d3 status should be enabled
+cat /proc/driver/nvidia/gpus/*/power    # runtime d3 and the s0ix status should be enabled
 gpu-mux status                          # current mux mode
 nvidia-smi                              # lists the dgpu, and wakes it up in the process
 ```
@@ -61,6 +61,11 @@ nvidia-smi                              # lists the dgpu, and wakes it up in the
   to the dgpu, so without it in the list there is no external screen. With both
   listed and the power control set to auto, the dgpu still reaches D3cold when
   nothing is plugged in.
+
+- **S0ix has to be turned on by hand.** The dgpu reports its platform support
+  as supported but leaves the status disabled until
+  `NVreg_EnableS0ixPowerManagement=1` is set. This laptop only offers `s2idle`
+  in `/sys/power/mem_sleep`, so without it the dgpu stays powered during sleep.
 
 - **`fbdev=1` is harmless,** it does not keep the dgpu awake. Only the missing
   runtime power management did.
