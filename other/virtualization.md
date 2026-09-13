@@ -212,7 +212,10 @@ claims its controller before the `nvme` driver can. Binding by vendor:device
 id is enough because the two nvme drives are different models
 ([Arch wiki: Binding vfio-pci via device ID](https://wiki.archlinux.org/title/PCI_passthrough_via_OVMF#Binding_vfio-pci_via_device_ID)).
 
-`/etc/modprobe.d/vfio.conf`:
+Two files in two different folders, one for modprobe and one for mkinitcpio,
+each one only understands its own syntax.
+
+The modprobe one, `/etc/modprobe.d/vfio.conf`:
 
 ```
 options vfio-pci ids=144d:a808
@@ -225,7 +228,8 @@ the real root even exists ([Arch wiki: Loading vfio-pci early](https://wiki.arch
 The `modconf` hook, already in `HOOKS`, copies `/etc/modprobe.d` into the
 image, so the ids are known there too.
 
-`/etc/mkinitcpio.conf.d/vfio.conf`:
+The mkinitcpio one, `/etc/mkinitcpio.conf.d/vfio-modules.conf`, next to
+`graphics.conf`:
 
 ```
 MODULES+=(vfio_pci vfio vfio_iommu_type1)
@@ -271,13 +275,29 @@ with
 ```lua
 -- With ~/.config/hypr/igpu-only present hyprland leaves the dgpu alone, so
 -- that a vm can take it without a logout. The hdmi port then only works
--- inside the vm that has the dgpu.
+-- inside the vm that has the dgpu. Egl is restricted to mesa as well: glvnd
+-- otherwise loads the nvidia egl library while hyprland looks for its egl
+-- device, and that library opens /dev/nvidia0 and keeps it open. Every app
+-- hyprland starts inherits the variable, gpu-run sets it back to nvidia.
 local igpu_only = io.open(os.getenv("HOME") .. "/.config/hypr/igpu-only", "r")
 if igpu_only then
     igpu_only:close()
+    hl.env("__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/50_mesa.json")
 else
     for _, dev in ipairs(other) do table.insert(amd, dev) end
 end
+```
+
+Leaving the dgpu out of `AQ_DRM_DEVICES` is not enough on its own: the nvidia
+driver only lets a device go when every process has closed it, and glvnd makes
+hyprland (and any egl app) open it without ever rendering on it. The
+`__EGL_VENDOR_LIBRARY_FILENAMES` line stops that. The same env variable has to
+be set the other way round in `gpu-run` (`setups/setup-graphics/files/gpu-run`
+and `/usr/local/bin/gpu-run`), otherwise egl apps started with it silently
+render on the igpu:
+
+```sh
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
 ```
 
 Create the marker and log out and in:
@@ -286,13 +306,47 @@ Create the marker and log out and in:
 touch ~/.config/hypr/igpu-only
 ```
 
-Check that hyprland only has the amd card and that nothing holds the dgpu:
+Check that hyprland has only the amd card open and that nothing holds the
+dgpu. Variables set from the config do not show in `/proc/<pid>/environ`, the
+open files are what counts:
 
 ```bash
-tr '\0' '\n' < /proc/$(pidof Hyprland)/environ | grep AQ_DRM_DEVICES   # one card only
-sudo fuser -v /dev/nvidia* /dev/dri/by-path/pci-0000:01:00.0-*          # nothing, or nvidia-powerd only
-dgpu                                                                     # still D3cold
+ls -l /proc/$(pidof Hyprland)/fd | grep -E 'dri|nvidia'    # only the amdgpu card and render node, no /dev/nvidia*
+ls -l /dev/dri/by-path/                                    # which cardN and renderDN belong to 06:00.0 (amd) and 01:00.0 (nvidia)
+sudo fuser -v /dev/nvidia* /dev/dri/by-path/pci-0000:01:00.0-*   # nothing, or nvidia-powerd only
+dgpu                                                        # still D3cold
 ```
+
+Anything that `fuser` lists on `/dev/nvidia*` besides `nvidia-powerd` has to
+be closed before a vm with the dgpu starts; the hook of 2.7 refuses the start
+and names it otherwise. `rog-control-center` is one of them: it reads the card
+through nvml, which opens `/dev/nvidia0`, so close it before starting a vm.
+
+One more file, because `AQ_DRM_DEVICES` is only honoured when hyprland
+starts: when the nvidia driver comes back after a vm, its drm card appears
+again as a new device and aquamarine adds every hotplugged gpu, list or not,
+so hyprland would grab the dgpu after the first vm. The rule below takes the
+`seat` tags away from the drm card of the nvidia gpu, and a device without
+them is unknown to logind, which then refuses to hand it to any compositor of
+the session ([systemd: multi-seat](https://www.freedesktop.org/wiki/Software/systemd/multiseat/)).
+Only the card node is affected; the render node, `gpu-run` and cuda are not.
+
+`/etc/udev/rules.d/72-vfio-dgpu.rules`:
+
+```
+# The drm card of the nvidia dgpu is hidden from logind so that no compositor
+# of the session can take it: hyprland would otherwise grab it every time the
+# nvidia driver comes back after a vm (aquamarine adds hotplugged gpus even
+# when AQ_DRM_DEVICES leaves them out). The render node is not affected.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", ATTRS{vendor}=="0x10de", TAG-="seat", TAG-="master-of-seat"
+```
+
+```bash
+sudo udevadm control --reload
+```
+
+It applies the next time the card is added, that is after the next vm or
+reboot. A hyprland that already holds the card keeps it until a logout.
 
 What changes on the host: the hdmi port does nothing while hyprland runs on
 the igpu, it belongs to whichever vm has the dgpu (a monitor plugged in shows
@@ -326,19 +380,36 @@ uses_gpu=$(xmllint --xpath \
     "count(//hostdev/source/address[@bus='0x01'][@slot='0x00'][@function='0x0'])" -)
 [ "$uses_gpu" != "0" ] || exit 0
 
+# nvidia-powerd allows five starts per boot, reset-failed lifts that.
+powerd_start() {
+    systemctl reset-failed nvidia-powerd.service
+    systemctl start nvidia-powerd.service
+}
+
 shopt -s nullglob
 case "$operation/$phase" in
     prepare/begin)
         systemctl stop nvidia-powerd.service
-        echo on > "/sys/bus/pci/devices/$gpu/power/control"    # wake it from D3cold
-        if fuser -s /dev/nvidia* /dev/dri/by-path/pci-"$gpu"-* 2>/dev/null; then
-            echo "$vm: the dgpu is in use on the host, see: fuser -v /dev/nvidia* /dev/dri/by-path/pci-$gpu-*" >&2
-            systemctl start nvidia-powerd.service
+        # Only /dev/nvidia* matters: the nvidia driver waits for every user of
+        # these to close them before it lets the card go, and libvirt would
+        # hang. A drm node held open is unplugged cleanly by the kernel.
+        if fuser -s /dev/nvidia* 2>/dev/null; then
+            echo "$vm: the dgpu is in use on the host, see: fuser -v /dev/nvidia*" >&2
+            powerd_start
             exit 1
         fi
+        echo on > "/sys/bus/pci/devices/$gpu/power/control"    # wake it from D3cold
         ;;
     release/end)
-        systemctl start nvidia-powerd.service
+        # libvirt has rebound nvidia by now. The udev rule of
+        # nvidia-laptop-power-cfg enables the runtime power management on that
+        # bind, repeating it here costs nothing and covers a refused start.
+        for _ in $(seq 50); do
+            [ "$(basename "$(readlink "/sys/bus/pci/devices/$gpu/driver" 2>/dev/null)")" = nvidia ] && break
+            sleep 0.2
+        done
+        echo auto > "/sys/bus/pci/devices/$gpu/power/control"
+        powerd_start
         ;;
 esac
 ```
@@ -350,10 +421,10 @@ sudo systemctl restart libvirtd.service     # hooks are picked up at daemon star
 
 - `prepare/begin` runs before libvirt touches any device. A non zero exit
   aborts the vm start, so a dgpu that is still in use shows up as a clear
-  error in virt-manager instead of a crashed compositor.
-- `release/end` runs after libvirt has given the dgpu back to `nvidia`. The
-  udev rule of `nvidia-laptop-power-cfg` sets its runtime power management
-  again on that bind, so the card goes back to sleep.
+  error in virt-manager instead of a hung libvirt.
+- `release/end` runs after libvirt has given the dgpu back to `nvidia`. It
+  sets the runtime power management to `auto` so the card goes back to
+  sleep, and starts `nvidia-powerd` again.
 - `xmllint` comes with `libxml2`, a dependency of libvirt. Hooks must not call
   `virsh`, libvirt would deadlock, hence the sysfs and xml parsing.
 
@@ -470,8 +541,8 @@ The list to keep in mind for a reinstall, all of it is in this guide:
 | Where | What |
 |---|---|
 | `/etc/fstab` | The `/vmstore` line. |
-| `/etc/modprobe.d/vfio.conf`, `/etc/mkinitcpio.conf.d/vfio.conf` | The windows nvme on vfio-pci. |
-| `~/.config/hypr/conf/environments/default.lua`, `~/.config/hypr/igpu-only` | Hyprland on the igpu. |
+| `/etc/modprobe.d/vfio.conf`, `/etc/mkinitcpio.conf.d/vfio-modules.conf` | The windows nvme on vfio-pci. |
+| `~/.config/hypr/conf/environments/default.lua`, `~/.config/hypr/igpu-only`, `/usr/local/bin/gpu-run`, `/etc/udev/rules.d/72-vfio-dgpu.rules` | Hyprland on the igpu. |
 | `/etc/libvirt/hooks/qemu` | The dgpu hook. |
 | `/etc/modprobe.d/kvmfr.conf`, `/etc/modules-load.d/kvmfr.conf`, `/etc/udev/rules.d/99-kvmfr.rules`, `/etc/libvirt/qemu.conf` | Looking Glass. |
 | `~/.config/looking-glass/client.ini` | Looking Glass client. |
@@ -566,15 +637,33 @@ vm-export
 
 #### Add the dgpu and tune the vm
 
-With the vm off, `virsh edit win11` (or the XML tabs in virt-manager). The
-blocks below replace or add to what virt-manager generated, the parts not
-shown stay as they are.
+With the vm off, `virsh edit win11` (or the XML tab of `Overview` in
+virt-manager). The blocks below replace or add to what virt-manager
+generated, the parts not shown stay as they are.
 
-The first line gets the qemu namespace, needed for the Looking Glass device:
+Start with the Looking Glass shared memory device, because it needs the qemu
+namespace on the first line and **libvirt drops that namespace on save unless
+a `<qemu:...>` element uses it in the same edit**. Changing the first line on
+its own therefore looks like the change is refused. Both at once, the first
+line:
 
 ```xml
 <domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
 ```
+
+and the device right before `</domain>`, its size the 64 MiB of 2.8 in bytes:
+
+```xml
+<qemu:commandline>
+  <qemu:arg value="-device"/>
+  <qemu:arg value="{'driver':'ivshmem-plain','id':'shmem0','memdev':'looking-glass'}"/>
+  <qemu:arg value="-object"/>
+  <qemu:arg value="{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'/dev/kvmfr0','size':67108864,'share':true}"/>
+</qemu:commandline>
+```
+
+After saving, `virsh dumpxml win11 | head -1` shows the namespace. The other
+blocks can be added in the same or in later edits.
 
 Pin the vcpus to cores 2 to 7 (cpus 4 to 15 of `lscpu -e`, a core is a pair
 of consecutive cpus on this amd) and keep cores 0 and 1 for the host, hyprland
@@ -669,18 +758,6 @@ mouse, clipboard and audio to the client.
 (remove `<input type="tablet" bus="usb">...</input>` and any other `<sound>`
 or `<audio>` element).
 
-Finally the shared memory device, right before `</domain>`. The size is the
-64 MiB of 2.8 in bytes:
-
-```xml
-<qemu:commandline>
-  <qemu:arg value="-device"/>
-  <qemu:arg value="{'driver':'ivshmem-plain','id':'shmem0','memdev':'looking-glass'}"/>
-  <qemu:arg value="-object"/>
-  <qemu:arg value="{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'/dev/kvmfr0','size':67108864,'share':true}"/>
-</qemu:commandline>
-```
-
 Save, export, and start the vm:
 
 ```bash
@@ -703,11 +780,10 @@ error. Error `Code 43` is handled in [3.1 Code 43](#code-43).
    as administrator with the default options, it installs the ivshmem driver
    and a service that starts on boot
    ([Looking Glass: host installation](https://looking-glass.io/docs/B7/install_host/)).
-2. The dgpu has no monitor, so windows has no display on it to capture. Install
-   the [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver)
-   (`VDD Control` from its releases page): install the driver, add one
-   display of `2560x1440` at `165 Hz`. An hdmi dummy plug does the same job in
-   hardware.
+2. The dgpu has no monitor, so windows has no display on it to capture. The
+   [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver)
+   adds one, see [below](#the-virtual-display). An hdmi dummy plug does the
+   same job in hardware.
 3. `Settings > System > Display`: select the virtual display, `Multiple
    displays > Show only on 2` (the number of the virtual one), so that the
    emulated vga is off and the desktop lives on the dgpu.
@@ -720,6 +796,82 @@ looking-glass-client
 The window fills the panel, `RightCtrl` toggles between the vm and hyprland,
 `RightCtrl+Q` quits the client, `RightCtrl+F` toggles full screen. Audio and
 clipboard go through spice, nothing else to configure.
+
+#### The virtual display
+
+The driver creates a monitor that windows treats as a real one, attached to
+the gpu of your choice. Everything is configured in one xml file, the control
+app only installs, reloads and edits it
+([VDD wiki: configuring the driver](https://github.com/VirtualDrivers/Virtual-Display-Driver/wiki/How-to-configure-the-driver)).
+
+1. Download `VDD.Control.<version>.zip` from the
+   [releases page](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases),
+   extract it anywhere and run `Virtual Driver Control` as administrator. It
+   is portable, nothing else to install; it needs the Visual C++
+   redistributable, which the Looking Glass host installer already pulled in.
+2. Click `Install Driver` (bottom right) and wait for `Task Progress` to
+   finish. Windows gets a new display at once, at a default resolution and on
+   whichever gpu the driver picked.
+3. Open `C:\VirtualDisplayDriver\vdd_settings.xml` in notepad (as
+   administrator) or through `Tools > XML editor` of the app and make it say:
+   one monitor, on the nvidia gpu by its device manager name, the resolution
+   of the panel:
+   ```xml
+   <?xml version='1.0' encoding='utf-8'?>
+   <vdd_settings>
+       <monitors>
+           <count>1</count>
+       </monitors>
+       <gpu>
+           <friendlyname>NVIDIA GeForce RTX 3070 Ti Laptop GPU</friendlyname>
+       </gpu>
+       <global>
+           <g_refresh_rate>60</g_refresh_rate>
+           <g_refresh_rate>165</g_refresh_rate>
+       </global>
+       <resolutions>
+           <resolution>
+               <width>2560</width>
+               <height>1440</height>
+               <refresh_rate>165</refresh_rate>
+           </resolution>
+           <resolution>
+               <width>1920</width>
+               <height>1080</height>
+               <refresh_rate>165</refresh_rate>
+           </resolution>
+       </resolutions>
+       <options>
+           <CustomEdid>false</CustomEdid>
+           <PreventSpoof>false</PreventSpoof>
+           <EdidCeaOverride>false</EdidCeaOverride>
+           <HardwareCursor>true</HardwareCursor>
+           <SDR10bit>false</SDR10bit>
+           <HDRPlus>false</HDRPlus>
+           <logging>false</logging>
+           <debuglogging>false</debuglogging>
+       </options>
+   </vdd_settings>
+   ```
+   The `friendlyname` is what `Device Manager > Display adapters` shows for
+   the dgpu, copy it from there if it differs. It matters: the vm has two
+   display adapters, the emulated vga and the dgpu, and Looking Glass can
+   only capture a display that hangs off the dgpu. `g_refresh_rate` values
+   apply to every resolution, the `resolution` entries are the modes windows
+   offers. `HardwareCursor` stays on so that the cursor of the vm is drawn by
+   Looking Glass instead of twice.
+4. Click `Restart Driver` in the app so it reads the file. `Settings > System > Display > Identify` 
+   then shows two numbered displays; the new one is the virtual monitor, at `2560x1440` and, under 
+   `Advanced display`, `165 Hz`.
+5. Now step 3 above: select the virtual display, `Show only on <its number>`.
+   The spice window of virt-manager goes black, that is expected, the desktop
+   now only exists on the dgpu and the Looking Glass client shows it.
+
+To get the desktop back on the emulated vga without seeing anything, click
+into the black spice window, press `Win+P` and pick `Duplicate` with the arrow
+keys and `Enter`. If windows ever comes up black after a driver update, the
+project's advice is to boot into safe mode and uninstall the virtual display
+from the device manager.
 
 #### Code 43
 
@@ -890,10 +1042,28 @@ start fails.
 ## 7. Troubleshooting
 
 - **`Hook script execution failed` when starting a vm.** Something on the
-  host has the dgpu open. `sudo fuser -v /dev/nvidia* /dev/dri/by-path/pci-0000:01:00.0-*`
-  names it. If it is `Hyprland`, the marker file of 2.6 is missing or the
-  session was not restarted. `journalctl -u libvirtd` has the message of the
-  hook.
+  host has `/dev/nvidia*` open. `sudo fuser -v /dev/nvidia*` names it. If it
+  is `Hyprland`, the egl line of 2.6 is missing or the session was not
+  restarted. If it is an app (`rog-control-center`, a cuda program, something
+  run with `gpu-run`), close it. `journalctl -u libvirtd` has the message of
+  the hook.
+- **The dgpu stays awake after the vm** (`dgpu` says `active`, `D0`). Check
+  `cat /sys/bus/pci/devices/0000:01:00.0/power/control`: it must be `auto`,
+  `echo auto | sudo tee` that file if not; the hook does it on every clean
+  stop. Then `sudo fuser -v /dev/nvidia*` for what keeps it busy.
+- **`nvidia-powerd` is `failed` with `start-limit-hit`.** Its unit allows
+  five starts per boot and every vm cycle uses one. `sudo systemctl
+  reset-failed nvidia-powerd && sudo systemctl start nvidia-powerd`; the
+  hook does the same.
+- **Hyprland holds `/dev/dri/card0` after a vm** (`ls -l /proc/$(pidof
+  Hyprland)/fd | grep card0`). The udev rule of 2.6 is missing or was added
+  after the card came back; log out and in once, from then on it applies.
+- **An xml edit is silently reverted.** libvirt rewrites the xml on save
+  and drops what it considers unused, most visibly the `xmlns:qemu`
+  namespace when no `<qemu:commandline>` exists yet. Add both in one edit,
+  see [3.1](#add-the-dgpu-and-tune-the-vm). A real error (a typo, an
+  unknown element) is shown instead, and `virsh edit` offers to reopen the
+  editor.
 - **The hook does nothing.** libvirt only reads `/etc/libvirt/hooks` when it
   starts: `sudo systemctl restart libvirtd`. Check it is executable.
 - **The dgpu does not come back after the vm stops.** `lspci -nnk -s 01:00.0`
@@ -906,7 +1076,9 @@ start fails.
   ```
 - **Looking Glass shows `Waiting for host`.** The host service inside windows
   is not running or captures nothing: the desktop must be on the virtual
-  display of the dgpu (`Show only on 2`), and both versions must match.
+  display, that display must belong to the dgpu (`friendlyname` in
+  `vdd_settings.xml`), and both versions must match. The log of the host
+  service is `C:\ProgramData\Looking Glass (host)\looking-glass-host.txt`.
 - **`/dev/kvmfr0` is a regular file.** A vm started before the module was
   loaded and qemu created a file in its place. `sudo rm /dev/kvmfr0 && sudo
   modprobe -r kvmfr && sudo modprobe kvmfr`
@@ -915,7 +1087,9 @@ start fails.
   attached or the `NetKVM` driver was not loaded, see [3.1](#install-windows).
 - **The Samsung drive shows up in `lsblk`.** vfio-pci did not take it: check
   `/etc/modprobe.d/vfio.conf`, that the mkinitcpio drop-in exists, and that
-  `mkinitcpio -P` ran after both.
+  `mkinitcpio -P` ran after both. A `libkmod: ERROR ... ignoring bad line
+  starting with 'MODULES+=('` during `mkinitcpio -P` means the `MODULES` line
+  landed in the modprobe file instead of the mkinitcpio one.
 - **A linux vm with grub hangs right after the grub menu** (Debian, Fedora,
   RHEL family and their live isos) with `edk2-ovmf` 202505 or newer. Known
   Arch packaging issue; the workaround is the `edk2-ovmf-fedora` aur package
