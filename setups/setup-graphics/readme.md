@@ -20,18 +20,25 @@ Once it is set up, the dgpu is used like this:
 - Maximum performance: `gpu-mux ultimate` and reboot.
 
 Run it as your normal user, it calls `sudo` when it needs to. It expects a fresh
-installation, with nouveau and without any proprietary driver, and running it
-more than once is safe. It stops if it does not find both gpus. Reboot when it
-finishes.
+installation, with nouveau and without any proprietary driver, plus `git` and
+`base-devel` for `makepkg`. Running it more than once is safe. It stops if it
+does not find both gpus. Reboot when it finishes.
+
+It follows the nvidia section of the [asus-linux guide for Arch](https://opengamingcollective.github.io/asusctl/distributions/arch.html):
+`nvidia-open-dkms` for an ampere card, `nvidia-laptop-power-cfg`, the nvidia
+services and the vulkan packages. The guide warns that some ampere laptops crash
+with the open driver because of gsp firmware issues; this one does not, so the
+proprietary `nvidia-580xx-dkms` from the aur is only the fallback if
+`journalctl -k | grep -i gsp` ever shows such crashes.
 
 ### What it does
 
 1. Finds both gpus by their pci vendor, `0x1002` for amd and `0x10de` for nvidia.
 2. Installs `nvidia-open-dkms`, `nvidia-utils`, `nvidia-prime`, `vulkan-radeon` and `vulkan-icd-loader`, plus the headers of every installed kernel. `nvidia-open` is the branch recommended for ampere cards and dkms rebuilds it for every kernel.
-3. Writes the kernel mode setting and power management options into `/etc/modprobe.d/nvidia.conf`, and blacklists nouveau.
-4. Puts both graphics drivers into the initramfs, drops the `kms` hook from `/etc/mkinitcpio.conf` and rebuilds it.
-5. Enables the nvidia suspend, resume and hibernate services, and `nvidia-powerd` for the dynamic boost.
-6. Writes `/etc/tmpfiles.d/nvidia-runtime-pm.conf`, which lets the dgpu and its hdmi audio device power off when they are idle.
+3. Removes the files that older versions of this script wrote by hand (`/etc/modprobe.d/nvidia.conf`, `/etc/modprobe.d/nouveau-blacklist.conf`, `/etc/tmpfiles.d/nvidia-runtime-pm.conf`, `/etc/mkinitcpio.conf.d/nvidia.conf`), they collide with the package of the next step or duplicate what `nvidia-utils` ships. nouveau is blacklisted by `/usr/lib/modprobe.d/nvidia-utils.conf`.
+4. Builds and installs [`nvidia-laptop-power-cfg`](https://gitlab.com/asus-linux/nvidia-laptop-power-cfg) with `makepkg`. It ships `/etc/modprobe.d/nvidia.conf` (`nvidia_drm modeset=1 fbdev=0`, `NVreg_EnableS0ixPowerManagement=1`, `NVreg_DynamicPowerManagement=0x02`) and `/usr/lib/udev/rules.d/80-nvidia-pm.rules`, which sets the runtime power management of the dgpu to `auto` when the driver binds and removes the usb functions some nvidia cards expose. The hdmi audio function needs nothing, `snd_hda_intel` enables its runtime power management on its own.
+5. Puts `amdgpu` into the initramfs, drops the `kms` hook from `/etc/mkinitcpio.conf` (it would pull nouveau in) and rebuilds it. nvidia is loaded later from the real root.
+6. Enables the nvidia suspend, resume and hibernate services, and `nvidia-powerd` for the dynamic boost.
 7. Installs `files/gpu-run` and `files/gpu-mux` into `/usr/local/bin`.
 8. Writes the graphics environment of hyprland into `~/.config/hypr/conf/environments/default.lua`.
 
@@ -52,10 +59,13 @@ nvidia-smi                              # lists the dgpu, and wakes it up in the
   `/dev/dri/cardN` nodes have no colons, and those are the ones the script
   detects.
 
-- **The runtime power management cannot be set with a udev rule.** nvidia is
-  loaded from the initramfs, so its bind event happens before the rules of `/etc`
-  exist and the rule never fires. A `systemd-tmpfiles` entry runs later, already
-  in the real root, and does work.
+- **nvidia must not be loaded from the initramfs.** The runtime power
+  management is set by a udev rule on the bind event of the driver. When nvidia
+  sat in the initramfs that bind happened before the rules of the real root
+  existed and a rule matching only `bind` never fired, which is why an older
+  version of this script used a `systemd-tmpfiles` entry instead. Now only
+  `amdgpu` is early loaded, nvidia binds in the real root and the rule of
+  `nvidia-laptop-power-cfg` sees it.
 
 - **Hyprland has to manage both gpus, the amd one first.** The hdmi port is wired
   to the dgpu, so without it in the list there is no external screen. With both
@@ -64,11 +74,13 @@ nvidia-smi                              # lists the dgpu, and wakes it up in the
 
 - **S0ix has to be turned on by hand.** The dgpu reports its platform support
   as supported but leaves the status disabled until
-  `NVreg_EnableS0ixPowerManagement=1` is set. This laptop only offers `s2idle`
-  in `/sys/power/mem_sleep`, so without it the dgpu stays powered during sleep.
+  `NVreg_EnableS0ixPowerManagement=1` is set, which `nvidia-laptop-power-cfg`
+  does. This laptop only offers `s2idle` in `/sys/power/mem_sleep`, so without
+  it the dgpu stays powered during sleep.
 
-- **`fbdev=1` is harmless,** it does not keep the dgpu awake. Only the missing
-  runtime power management did.
+- **`fbdev` does not matter for power.** The package sets `fbdev=0`, and
+  `fbdev=1` did not keep the dgpu awake either. Only the missing runtime power
+  management did.
 
 - **The name of the radeon vulkan icd changes** between `radeon_icd.json` and
   `radeon_icd.x86_64.json` depending on multilib, so the script looks it up
@@ -87,11 +99,13 @@ nvidia-smi                              # lists the dgpu, and wakes it up in the
   the first displayport of nvidia is `DP-6`: amdgpu already took `DP-1` to
   `DP-5`. Both gpus expose an eDP connector, the one of the dgpu being the panel
   link that the mux keeps disconnected in hybrid mode, and it still takes a
-  number. Both drivers sit in the initramfs and probe at the same time, so the
-  winner changes from boot to boot:
+  number. When both drivers sat in the initramfs they probed at the same time
+  and the winner changed from boot to boot:
 
     - amdgpu registers first: the real panel is `eDP-1`, the dead nvidia link is `eDP-2`.
     - nvidia registers first: the dead nvidia link is `eDP-1`, the real panel is `eDP-2`.
 
-  A rule pinned to `eDP-1` therefore lands on the dead connector every other boot
-  and the panel comes up with its preferred mode and scale 1.
+  A rule pinned to `eDP-1` therefore landed on the dead connector every other
+  boot and the panel came up with its preferred mode and scale 1. With nvidia
+  loading from the real root amdgpu should always register first, but the
+  `desc:` rule does not depend on that and stays.

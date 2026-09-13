@@ -6,14 +6,14 @@
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 FILES_DIR="$SCRIPT_DIR/files"
 
-# Card nodes are needed for hyprland and the pci address for the power management.
+# Card nodes are needed for hyprland.
 for dev in /dev/dri/by-path/pci-*-card; do
     pci=$(basename "$dev" | sed -E 's/^pci-(.*)-card$/\1/')
     card=$(basename "$(readlink -f "$dev")")
 
     case $(cat "/sys/bus/pci/devices/$pci/vendor") in
-        0x1002) IGPU_CARD="$card" ;;                    # AMD
-        0x10de) DGPU_CARD="$card"; DGPU_PCI="$pci" ;;   # NVIDIA
+        0x1002) IGPU_CARD="$card" ;;   # AMD
+        0x10de) DGPU_CARD="$card" ;;   # NVIDIA
     esac
 done
 
@@ -29,6 +29,7 @@ echo "Installing the nvidia drivers and the amd vulkan driver..."
 
 PACKAGES=(nvidia-open-dkms nvidia-utils nvidia-prime vulkan-radeon vulkan-icd-loader)
 
+# dkms builds the nvidia module against the headers of every installed kernel.
 for kernel in linux linux-lts linux-zen linux-hardened; do
     pacman -Qq "$kernel" &> /dev/null && PACKAGES+=("$kernel-headers")
 done
@@ -36,31 +37,39 @@ done
 sudo pacman -S --needed --noconfirm "${PACKAGES[@]}"
 
 
-echo "Writing the module options and blacklisting nouveau..."
+echo "Removing the files of the previous version of this script..."
 
-sudo tee /etc/modprobe.d/nvidia.conf > /dev/null << 'EOF'
-# Kernel mode setting, needed by wayland.
-options nvidia_drm modeset=1 fbdev=1
+# They collide with nvidia-laptop-power-cfg or duplicate what nvidia-utils
+# ships. Only files that no package owns are removed.
+for file in /etc/modprobe.d/nvidia.conf /etc/modprobe.d/nouveau-blacklist.conf \
+            /etc/tmpfiles.d/nvidia-runtime-pm.conf /etc/mkinitcpio.conf.d/nvidia.conf; do
+    [[ -e "$file" ]] && ! pacman -Qo "$file" &> /dev/null && sudo rm "$file"
+done
 
-# Let the dgpu power off when it is idle and keep its memory across suspend.
-# S0ix keeps it powered down during s2idle, the only sleep state of this laptop.
-options nvidia NVreg_DynamicPowerManagement=0x02 NVreg_PreserveVideoMemoryAllocations=1 NVreg_EnableS0ixPowerManagement=1
+
+echo "Installing nvidia-laptop-power-cfg..."
+
+# The asus-linux package with the nvidia power management: the module options
+# in /etc/modprobe.d/nvidia.conf and the udev rule that lets the dgpu power off
+# when it is idle. Its hdmi audio device is handled by snd_hda_intel itself.
+if ! pacman -Qq nvidia-laptop-power-cfg &> /dev/null; then
+    BUILD_DIR=$(mktemp -d)
+    git clone https://gitlab.com/asus-linux/nvidia-laptop-power-cfg.git "$BUILD_DIR"
+    (cd "$BUILD_DIR" && makepkg -sfi --noconfirm)
+    rm -rf "$BUILD_DIR"
+fi
+
+
+echo "Rebuilding the initramfs without nouveau..."
+
+# Only amdgpu is loaded early. nvidia loads later from the real root, so that
+# the udev rule of nvidia-laptop-power-cfg sees it bind.
+sudo tee /etc/mkinitcpio.conf.d/graphics.conf > /dev/null << 'EOF'
+MODULES+=(amdgpu)
 EOF
 
-sudo tee /etc/modprobe.d/nouveau-blacklist.conf > /dev/null << 'EOF'
-blacklist nouveau
-options nouveau modeset=0
-EOF
-
-
-echo "Rebuilding the initramfs with both graphics drivers..."
-
-sudo tee /etc/mkinitcpio.conf.d/nvidia.conf > /dev/null << 'EOF'
-MODULES+=(amdgpu nvidia nvidia_modeset nvidia_uvm nvidia_drm)
-EOF
-
-# The kms hook would put nouveau back into the initramfs, the modules above
-# replace it. The original file is kept as /etc/mkinitcpio.conf.bak.
+# The kms hook would put nouveau into the initramfs, the module above replaces
+# it. The original file is kept as /etc/mkinitcpio.conf.bak.
 if grep -qE '^HOOKS=.*\bkms\b' /etc/mkinitcpio.conf; then
     sudo sed -i.bak -E '/^HOOKS=\(/ { s/\bkms\b//; s/  +/ /g; s/\( /(/; s/ \)/)/ }' /etc/mkinitcpio.conf
 fi
@@ -74,18 +83,6 @@ sudo systemctl enable nvidia-suspend.service nvidia-resume.service nvidia-hibern
 # nvidia-powerd shifts the power budget between the cpu and the dgpu, this
 # laptop reports notebook dynamic boost as supported.
 sudo systemctl enable --now nvidia-powerd.service
-
-
-echo "Enabling the runtime power management of the dgpu..."
-
-DGPU_AUDIO="${DGPU_PCI%.*}.1"   # hdmi audio function of the dgpu
-
-sudo tee /etc/tmpfiles.d/nvidia-runtime-pm.conf > /dev/null << EOF
-w /sys/bus/pci/devices/$DGPU_PCI/power/control - - - - auto
-w /sys/bus/pci/devices/$DGPU_AUDIO/power/control - - - - auto
-EOF
-
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/nvidia-runtime-pm.conf
 
 
 echo "Installing the gpu-run and gpu-mux commands..."
@@ -118,3 +115,4 @@ EOF
 
 
 echo "The graphics setup is done, reboot to apply it. Read readme.md to know how to use the dgpu."
+echo "After the reboot, check that 'cat /proc/driver/nvidia/gpus/*/power' reports S0ix as enabled."
