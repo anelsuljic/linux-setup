@@ -19,10 +19,14 @@ Once it is set up, the dgpu is used like this:
 - External screen: just plug it in, the hdmi port is wired to the dgpu.
 - Maximum performance: `gpu-mux ultimate` and reboot.
 
-Run it as your normal user, it calls `sudo` when it needs to. It expects a fresh
-installation, with nouveau and without any proprietary driver, plus `git` and
-`base-devel` for `makepkg`. Running it more than once is safe. It stops if it
-does not find both gpus. Reboot when it finishes.
+Run it as your normal user, it calls `sudo` when it needs to. It is run by
+`setup.sh` on a fresh installation of Arch with this hyprland environment, after
+the asus-linux guide has been followed except for its nvidia section, so
+`asusctl` is present and `asusd` is running, and every package it needs besides
+the graphics ones is already installed. Running it again on a finished setup is
+safe: every step either finds its work done and skips it, or rewrites a file
+with the same content, and nothing is left behind apart from the initramfs
+rebuild. It stops if it does not find both gpus. Reboot when it finishes.
 
 It follows the nvidia section of the [asus-linux guide for Arch](https://opengamingcollective.github.io/asusctl/distributions/arch.html):
 `nvidia-open-dkms` for an ampere card, `nvidia-laptop-power-cfg`, the nvidia
@@ -33,14 +37,15 @@ proprietary `nvidia-580xx-dkms` from the aur is only the fallback if
 
 ### What it does
 
-1. Finds both gpus by their pci vendor, `0x1002` for amd and `0x10de` for nvidia.
-2. Installs `nvidia-open-dkms`, `nvidia-utils`, `nvidia-prime`, `vulkan-radeon` and `vulkan-icd-loader`, plus the headers of every installed kernel. `nvidia-open` is the branch recommended for ampere cards and dkms rebuilds it for every kernel.
-3. Removes the files that older versions of this script wrote by hand (`/etc/modprobe.d/nvidia.conf`, `/etc/modprobe.d/nouveau-blacklist.conf`, `/etc/tmpfiles.d/nvidia-runtime-pm.conf`, `/etc/mkinitcpio.conf.d/nvidia.conf`), they collide with the package of the next step or duplicate what `nvidia-utils` ships. nouveau is blacklisted by `/usr/lib/modprobe.d/nvidia-utils.conf`.
-4. Builds and installs [`nvidia-laptop-power-cfg`](https://gitlab.com/asus-linux/nvidia-laptop-power-cfg) with `makepkg`. It ships `/etc/modprobe.d/nvidia.conf` (`nvidia_drm modeset=1 fbdev=0`, `NVreg_EnableS0ixPowerManagement=1`, `NVreg_DynamicPowerManagement=0x02`) and `/usr/lib/udev/rules.d/80-nvidia-pm.rules`, which sets the runtime power management of the dgpu to `auto` when the driver binds and removes the usb functions some nvidia cards expose. The hdmi audio function needs nothing, `snd_hda_intel` enables its runtime power management on its own.
-5. Puts `amdgpu` into the initramfs, drops the `kms` hook from `/etc/mkinitcpio.conf` (it would pull nouveau in) and rebuilds it. nvidia is loaded later from the real root.
-6. Enables the nvidia suspend, resume and hibernate services, and `nvidia-powerd` for the dynamic boost.
-7. Installs `files/gpu-run` and `files/gpu-mux` into `/usr/local/bin`.
-8. Writes the graphics environment of hyprland into `~/.config/hypr/conf/environments/default.lua`.
+1. Checks that both gpus are on the pci bus, display class `0x03` with vendor `0x1002` for amd and `0x10de` for nvidia. No graphics driver needs to be loaded for this.
+2. Installs `nvidia-open-dkms`, `nvidia-utils`, `nvidia-prime`, `vulkan-radeon` and `vulkan-icd-loader`, plus the headers of every installed kernel. `nvidia-open` is the branch recommended for ampere cards and dkms rebuilds it for every kernel. nouveau is blacklisted by `/usr/lib/modprobe.d/nvidia-utils.conf`, nothing else is needed for that.
+3. Builds and installs [`nvidia-laptop-power-cfg`](https://gitlab.com/asus-linux/nvidia-laptop-power-cfg) with `makepkg`. It ships `/etc/modprobe.d/nvidia.conf` (`nvidia_drm modeset=1 fbdev=0`, `NVreg_EnableS0ixPowerManagement=1`, `NVreg_DynamicPowerManagement=0x02`) and `/usr/lib/udev/rules.d/80-nvidia-pm.rules`, which sets the runtime power management of the dgpu to `auto` when the driver binds and removes the usb functions some nvidia cards expose. The hdmi audio function needs nothing, `snd_hda_intel` enables its runtime power management on its own. Skipped when the package is already installed.
+4. Puts `amdgpu` into the initramfs, drops the `kms` hook from `/etc/mkinitcpio.conf` (it would pull nouveau in, the original is kept as `/etc/mkinitcpio.conf.bak`) and rebuilds it. nvidia is loaded later from the real root.
+5. Enables the nvidia suspend, resume and hibernate services, and `nvidia-powerd` for the dynamic boost. `nvidia-powerd` is only started right away when the nvidia driver is loaded, on the first run it starts after the reboot.
+6. Adds `amdgpu.dcdebugmask=0x10` to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub` and regenerates `grub.cfg`, which disables the panel self refresh of the igpu. Skipped when the parameter is already there, and the original file is kept as `/etc/default/grub.bak`.
+7. Sets `disable_nvidia_powerd_on_battery: false` in `/etc/asusd/asusd.ron` and restarts `asusd`. Skipped when it is already false, and it warns instead if the file does not exist yet.
+8. Installs `files/gpu-run` and `files/gpu-mux` into `/usr/local/bin`.
+9. Writes the graphics environment of hyprland into `~/.config/hypr/conf/environments/default.lua`. The file resolves the card nodes by driver name every time hyprland starts, the same way `sddm-hyprland` does for the greeter, so it contains no card numbers.
 
 ### How to check that it worked
 
@@ -49,6 +54,8 @@ dgpu                                    # function of .bashrc_custom: D0 is awak
 cat /proc/driver/nvidia/gpus/*/power    # runtime d3 and the s0ix status should be enabled
 gpu-mux status                          # current mux mode
 nvidia-smi                              # lists the dgpu, and wakes it up in the process
+grep -o 'amdgpu.dcdebugmask=0x10' /proc/cmdline          # panel self refresh is off
+grep disable_nvidia_powerd_on_battery /etc/asusd/asusd.ron  # false
 ```
 
 ### Things learned the hard way
@@ -56,8 +63,17 @@ nvidia-smi                              # lists the dgpu, and wakes it up in the
 - **The list of `AQ_DRM_DEVICES` is colon separated.** A path from
   `/dev/dri/by-path` carries its pci address, which contains colons, so it gets
   split into garbage, hyprland finds no gpus and crashes while starting. The
-  `/dev/dri/cardN` nodes have no colons, and those are the ones the script
-  detects.
+  `/dev/dri/cardN` nodes have no colons, so those are used.
+
+- **Card numbers cannot be written down by the script.** They depend on which
+  drivers are loaded and in which order: on the first run nouveau is bound to
+  the dgpu, after the reboot nvidia loads late and gets a different number. On
+  this laptop nvidia is `card0` and amdgpu `card1` even though amdgpu loads
+  first, because `simpledrm` holds minor 0 during early boot, amdgpu takes
+  minor 1, and nvidia inherits the freed minor 0 once it loads from the real
+  root. So `default.lua` looks the cards up by the `DRIVER=` line of
+  `/sys/class/drm/cardN/device/uevent` at every start, amd first, and hands the
+  result to `AQ_DRM_DEVICES`.
 
 - **nvidia must not be loaded from the initramfs.** The runtime power
   management is set by a udev rule on the bind event of the driver. When nvidia
@@ -81,6 +97,21 @@ nvidia-smi                              # lists the dgpu, and wakes it up in the
 - **`fbdev` does not matter for power.** The package sets `fbdev=0`, and
   `fbdev=1` did not keep the dgpu awake either. Only the missing runtime power
   management did.
+
+- **Plugging or unplugging the charger froze the screen,** and a power off
+  during the freeze needed a hardware reset. Three things happen at every
+  charger event. The nvidia driver wakes the dgpu for a few seconds on its own,
+  `nv-acpi.c` listens to the ac adapter and calls
+  `rm_power_source_change_event`; this is by design and harmless. asusd
+  switches the platform profile and, with `disable_nvidia_powerd_on_battery`
+  on, stops or starts `nvidia-powerd`, which opens the dgpu one more time; the
+  sbios disables the dynamic boost on battery anyway, so the setting saves
+  nothing and is turned off. And amdgpu, the igpu that drives the panel,
+  re-commits its idle optimizations and the panel self refresh transition
+  asserts, `WARNING ... power_psr.c:236 mod_power_set_psr_event`, 12 to 19
+  seconds after each event in the journal; that is the freeze, and
+  `amdgpu.dcdebugmask=0x10` disables the panel self refresh for good.
+  `rog-control-center` is only a gui over asusd and plays no part.
 
 - **The name of the radeon vulkan icd changes** between `radeon_icd.json` and
   `radeon_icd.x86_64.json` depending on multilib, so the script looks it up

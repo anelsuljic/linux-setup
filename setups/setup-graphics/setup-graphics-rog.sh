@@ -6,23 +6,23 @@
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 FILES_DIR="$SCRIPT_DIR/files"
 
-# Card nodes are needed for hyprland.
-for dev in /dev/dri/by-path/pci-*-card; do
-    pci=$(basename "$dev" | sed -E 's/^pci-(.*)-card$/\1/')
-    card=$(basename "$(readlink -f "$dev")")
+# Both gpus are found on the pci bus by their vendor, so no graphics driver
+# needs to be loaded for this check.
+for dev in /sys/bus/pci/devices/*; do
+    [[ $(cat "$dev/class") == 0x03* ]] || continue   # display controllers only
 
-    case $(cat "/sys/bus/pci/devices/$pci/vendor") in
-        0x1002) IGPU_CARD="$card" ;;   # AMD
-        0x10de) DGPU_CARD="$card" ;;   # NVIDIA
+    case $(cat "$dev/vendor") in
+        0x1002) IGPU_PCI=$(basename "$dev") ;;   # AMD
+        0x10de) DGPU_PCI=$(basename "$dev") ;;   # NVIDIA
     esac
 done
 
-if [[ -z "$IGPU_CARD" || -z "$DGPU_CARD" ]]; then
-    echo "Error: this script needs an AMD igpu and an NVIDIA dgpu, but found ${IGPU_CARD:-none} and ${DGPU_CARD:-none}."
+if [[ -z "$IGPU_PCI" || -z "$DGPU_PCI" ]]; then
+    echo "Error: this script needs an AMD igpu and an NVIDIA dgpu, but found ${IGPU_PCI:-none} and ${DGPU_PCI:-none}."
     exit 1
 fi
 
-echo "Found the igpu on $IGPU_CARD and the dgpu on $DGPU_CARD."
+echo "Found the igpu at $IGPU_PCI and the dgpu at $DGPU_PCI."
 
 
 echo "Installing the nvidia drivers and the amd vulkan driver..."
@@ -35,16 +35,6 @@ for kernel in linux linux-lts linux-zen linux-hardened; do
 done
 
 sudo pacman -S --needed --noconfirm "${PACKAGES[@]}"
-
-
-echo "Removing the files of the previous version of this script..."
-
-# They collide with nvidia-laptop-power-cfg or duplicate what nvidia-utils
-# ships. Only files that no package owns are removed.
-for file in /etc/modprobe.d/nvidia.conf /etc/modprobe.d/nouveau-blacklist.conf \
-            /etc/tmpfiles.d/nvidia-runtime-pm.conf /etc/mkinitcpio.conf.d/nvidia.conf; do
-    [[ -e "$file" ]] && ! pacman -Qo "$file" &> /dev/null && sudo rm "$file"
-done
 
 
 echo "Installing nvidia-laptop-power-cfg..."
@@ -81,8 +71,39 @@ echo "Enabling the nvidia suspend services and the dynamic boost daemon..."
 sudo systemctl enable nvidia-suspend.service nvidia-resume.service nvidia-hibernate.service
 
 # nvidia-powerd shifts the power budget between the cpu and the dgpu, this
-# laptop reports notebook dynamic boost as supported.
-sudo systemctl enable --now nvidia-powerd.service
+# laptop reports notebook dynamic boost as supported. It needs the nvidia
+# driver, so on the first run it only starts after the reboot.
+sudo systemctl enable nvidia-powerd.service
+[[ -d /sys/module/nvidia ]] && sudo systemctl start nvidia-powerd.service
+
+
+echo "Disabling the panel self refresh of the igpu..."
+
+# Plugging or unplugging the charger makes amdgpu re-commit its idle
+# optimizations, the panel self refresh transition asserts (a WARNING in
+# power_psr.c) and the panel freezes. amdgpu.dcdebugmask=0x10 turns it off.
+# The original file is kept as /etc/default/grub.bak.
+if [[ ! -e /etc/default/grub ]]; then
+    echo "Warning: no grub found, add amdgpu.dcdebugmask=0x10 to the kernel command line yourself."
+elif ! grep -qE '^GRUB_CMDLINE_LINUX_DEFAULT=.*amdgpu\.dcdebugmask=0x10' /etc/default/grub; then
+    sudo sed -i.bak -E '/^GRUB_CMDLINE_LINUX_DEFAULT="/ s/"$/ amdgpu.dcdebugmask=0x10"/' /etc/default/grub
+    sudo grub-mkconfig -o /boot/grub/grub.cfg
+fi
+
+
+echo "Keeping nvidia-powerd running on battery..."
+
+# asusd stops nvidia-powerd on battery and starts it again on ac, which opens
+# the dgpu one more time at every charger event, while the sbios disables the
+# dynamic boost on battery anyway. asusd writes asusd.ron on its first start.
+ASUSD_CONF=/etc/asusd/asusd.ron
+
+if [[ ! -e "$ASUSD_CONF" ]]; then
+    echo "Warning: $ASUSD_CONF does not exist, install asusctl and run this script again."
+elif grep -qE '^\s*disable_nvidia_powerd_on_battery:\s*true,' "$ASUSD_CONF"; then
+    sudo sed -i -E 's/^(\s*disable_nvidia_powerd_on_battery:\s*)true,/\1false,/' "$ASUSD_CONF"
+    sudo systemctl restart asusd.service
+fi
 
 
 echo "Installing the gpu-run and gpu-mux commands..."
@@ -104,9 +125,24 @@ mkdir -p "$ENVIRONMENTS_DIR"
 cat > "$ENVIRONMENTS_DIR/default.lua" << EOF
 -- Written by setup-graphics-rog.sh.
 
--- Gpus that hyprland manages, the primary one first. The list is colon
+-- Gpus that hyprland manages, the amd igpu first so that it drives the panel
+-- and the nvidia dgpu stays asleep. The cards are resolved by driver name at
+-- every start because their numbers are not stable, and the list is colon
 -- separated, so it needs card nodes and never paths from /dev/dri/by-path.
-hl.env("AQ_DRM_DEVICES", "/dev/dri/$IGPU_CARD:/dev/dri/$DGPU_CARD")
+local amd, other = {}, {}
+for n = 0, 9 do
+    local uevent = io.open("/sys/class/drm/card" .. n .. "/device/uevent", "r")
+    if uevent then
+        local driver
+        for line in uevent:lines() do
+            driver = line:match("^DRIVER=(.*)$") or driver
+        end
+        uevent:close()
+        table.insert(driver == "amdgpu" and amd or other, "/dev/dri/card" .. n)
+    end
+end
+for _, dev in ipairs(other) do table.insert(amd, dev) end
+if #amd > 0 then hl.env("AQ_DRM_DEVICES", table.concat(amd, ":")) end
 
 -- Vulkan and va-api default to amd so that apps do not wake up the dgpu.
 hl.env("VK_DRIVER_FILES", "$RADEON_ICD")
