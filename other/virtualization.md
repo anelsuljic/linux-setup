@@ -1,0 +1,929 @@
+# Virtualization with qemu/kvm
+
+How to set up qemu/kvm with libvirt on the ASUS ROG Strix G513RW running Arch
+with hyprland, for one windows 11 vm that gets the nvidia dgpu and its own nvme
+drive, and for linux vms used to try out distros. Everything the vms need to
+survive a reinstall of the host lives outside of the root filesystem, so on a
+fresh host only the [host setup](#2-host-setup) is repeated and the vms are
+defined again from their saved definitions.
+
+The decisions behind the setup, so that the rest makes sense:
+
+- **libvirt with virt-manager**, connected to `qemu:///system`. It handles
+  permissions, networking, uefi, tpm and pci devices, and it stores every vm as
+  an xml file that can be exported and imported.
+- **Windows lives on the Samsung nvme** (`/dev/nvme0n1` today) and gets the
+  whole nvme controller as a pci device. The host binds it to `vfio-pci` at boot
+  and never sees the drive again.
+- **The dgpu stays on the host** for cuda and `gpu-run`, and is handed to a vm
+  only while that vm runs. libvirt does the driver switching, a small hook
+  script takes care of what would keep the nvidia driver busy. For that to work
+  without a logout, hyprland has to stop managing the dgpu, which costs the hdmi
+  port on the host.
+- **The screen of the windows vm is the laptop panel**, through
+  [Looking Glass](https://looking-glass.io/): the dgpu renders into shared
+  memory and a client window on hyprland shows it. A virtual display driver
+  inside windows replaces the monitor that the dgpu does not have.
+- **Everything else lives on `lv_vmstore`**, mounted at `/vmstore`: linux vm
+  disks, isos, uefi variables, tpm state and the exported xml definitions.
+
+## 1. What this laptop has
+
+Facts the rest of the guide relies on, all read from this machine:
+
+- AMD Ryzen 9 6900HX, 8 cores / 16 threads, 30 GiB of ram, AMD-V (`svm`) on in
+  the bios. The kernel turns the AMD iommu on by itself when the bios exposes
+  it, no kernel parameter is needed ([Arch wiki: PCI passthrough via OVMF, Enabling IOMMU](https://wiki.archlinux.org/title/PCI_passthrough_via_OVMF#Enabling_IOMMU)).
+- The pci devices that matter, each one alone in its iommu group, which is the
+  best case for passthrough:
+
+  | Device | PCI address | Vendor:device | IOMMU group |
+  |---|---|---|---|
+  | NVIDIA RTX 3070 Ti Laptop GPU | `01:00.0` | `10de:24a0` | 14 |
+  | NVIDIA HDMI audio (same gpu) | `01:00.1` | `10de:228b` | 14 |
+  | Samsung 970 EVO Plus 500 GB (windows) | `02:00.0` | `144d:a808` | 15 |
+  | Micron 2450 1 TB (host) | `05:00.0` | `1344:5411` | 18 |
+  | AMD Radeon 680M igpu | `06:00.0` | `1002:1681` | 19 |
+
+- The host is on the Micron: efi and `/boot` partitions, then luks with lvm
+  `volgroup0` holding `lv_root`, `lv_swap` and `lv_vmstore` (350 GiB, ext4,
+  currently not mounted). Grub boots it, mkinitcpio builds the initramfs with
+  the systemd hooks (`sd-encrypt`, `lvm2`), `amdgpu` is early loaded through
+  `/etc/mkinitcpio.conf.d/graphics.conf`.
+- Hybrid graphics as set up by [setup-graphics-rog.sh](../setups/setup-graphics/readme.md):
+  the igpu drives the panel (2560x1440 at 165 Hz), the hdmi port is wired to the
+  dgpu, hyprland manages both gpus and the dgpu sleeps in D3cold.
+- `kvm_amd` is already loaded, nothing else related to virtualization is
+  installed.
+
+Commands to confirm it on any boot:
+
+```bash
+lscpu | grep -E 'Model name|Virtualization'     # AMD-V
+ls /sys/kernel/iommu_groups | wc -l              # 28 groups here, 0 means the iommu is off
+lsmod | grep -w kvm_amd
+```
+
+To list every iommu group with its devices (script from the
+[asus-linux vfio guide](https://asus-linux.org/guides/vfio-guide/)):
+
+```bash
+for g in $(find /sys/kernel/iommu_groups/* -maxdepth 0 -type d | sort -V); do
+    echo "IOMMU group ${g##*/}:"
+    for d in $g/devices/*; do echo -e "\t$(lspci -nns ${d##*/})"; done
+done
+```
+
+> `/dev/nvme0n1` and `/dev/nvme1n1` are numbered in probe order and can swap
+> between boots. The comments in `/etc/fstab` still call the efi partition of
+> the host `/dev/nvme0n1p1`, and today that drive is `nvme1n1`. Always identify
+> the windows drive by its pci address `02:00.0` or by
+> `/dev/disk/by-id/nvme-Samsung_SSD_970_EVO_Plus_500GB_S4EVNX0NB19363E`.
+
+## 2. Host setup
+
+Everything in this section is host configuration. It is what has to be redone
+on a fresh install, and nothing here touches the vms themselves.
+
+### 2.1 Packages
+
+```bash
+sudo pacman -S --needed qemu-desktop libvirt virt-manager edk2-ovmf swtpm dnsmasq
+yay -S looking-glass looking-glass-module-dkms
+```
+
+- `qemu-desktop`: qemu with kvm, spice, virtio-gpu and usb passthrough, the
+  variant the [Arch wiki](https://wiki.archlinux.org/title/QEMU#Installation)
+  recommends for a desktop.
+- `libvirt` and `virt-manager`: the daemon and its gui, `virsh` comes with
+  libvirt.
+- `edk2-ovmf`: the uefi firmware of the vms. `swtpm`: the emulated tpm 2.0
+  that windows 11 requires. `dnsmasq`: dhcp and dns of the default vm network.
+- `looking-glass` is the client, `looking-glass-module-dkms` the `kvmfr`
+  kernel module that lets it use the dma engine of the gpu. Both are aur
+  packages ([Arch wiki: Looking Glass](https://wiki.archlinux.org/title/PCI_passthrough_via_OVMF#Using_Looking_Glass_to_stream_guest_screen_to_the_host)),
+  and dkms needs the headers of every installed kernel, which the nvidia setup
+  already installs.
+
+### 2.2 libvirt daemon and access
+
+```bash
+sudo systemctl enable --now libvirtd.service
+sudo usermod -aG libvirt,kvm "$USER"
+```
+
+- `libvirtd.service` also pulls in `virtlogd` and `virtlockd` through their
+  sockets ([Arch wiki: libvirt, Daemon](https://wiki.archlinux.org/title/Libvirt#Daemon)).
+- The `libvirt` group gets password-less access to the system connection
+  through a polkit rule that libvirt ships. The `kvm` group is for the
+  `/dev/kvmfr0` device of Looking Glass later on.
+
+Log out and back in for the groups, then make `virsh` talk to the system
+connection by default. The line belongs in `~/.bashrc_custom`
+(`setups/setup-bashrc`):
+
+```bash
+export LIBVIRT_DEFAULT_URI=qemu:///system
+```
+
+Check:
+
+```bash
+virsh list --all      # empty list, no error
+```
+
+### 2.3 Default network
+
+libvirt ships a `default` nat network, `virbr0` on `192.168.122.0/24`, where
+dnsmasq hands out addresses and the vms reach the internet through whatever
+host interface is up ([libvirt: virtual networking](https://wiki.libvirt.org/VirtualNetworking.html#the-default-configuration)).
+It only needs to be started and set to autostart:
+
+```bash
+virsh net-autostart default
+virsh net-start default
+virsh net-list --all          # default   active   yes
+```
+
+If `default` is not listed at all:
+
+```bash
+virsh net-define /usr/share/libvirt/networks/default.xml
+```
+
+### 2.4 The vm store
+
+Mount `lv_vmstore` at `/vmstore`. The uuid is that of the filesystem inside
+the logical volume, it survives reinstalls of the host as long as the volume
+is not formatted:
+
+```bash
+sudo mkdir /vmstore
+lsblk -o NAME,UUID /dev/mapper/volgroup0-lv_vmstore   # ce3c7188-b888-4b2d-bb1d-9df284c0d9f1
+```
+
+Add it to `/etc/fstab` next to the other entries:
+
+```
+# /dev/mapper/volgroup0-lv_vmstore
+UUID=ce3c7188-b888-4b2d-bb1d-9df284c0d9f1	/vmstore  	ext4      	rw,relatime	0 2
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo mount /vmstore
+```
+
+Then the folders. `iso` and `xml` belong to the user so that isos can be
+copied and definitions exported without sudo, the rest stays with root and
+libvirt changes the owner of the files it creates on its own:
+
+```bash
+sudo mkdir -p /vmstore/{images,iso,nvram,tpm,xml}
+sudo chown "$USER" /vmstore/iso /vmstore/xml
+```
+
+| Folder | Content |
+|---|---|
+| `images/` | Disk images of the linux vms, libvirt pool `default`. |
+| `iso/` | Installation isos, libvirt pool `iso`. |
+| `nvram/` | Uefi variables of the vms (`<name>_VARS.fd`), the boot entries live here. |
+| `tpm/` | State of the emulated tpm of the windows vm. |
+| `xml/` | Exported definitions, one `<name>.xml` per vm, see [2.9](#29-saving-the-vm-definitions). |
+
+Storage pools tell libvirt and virt-manager where to create and look for
+files ([Arch wiki: libvirt, Storage pools](https://wiki.archlinux.org/title/Libvirt#Storage_pools)).
+The `default` pool is redefined so that virt-manager creates new disks in
+`/vmstore/images` instead of `/var/lib/libvirt/images`:
+
+```bash
+virsh pool-destroy default 2>/dev/null; virsh pool-undefine default 2>/dev/null
+virsh pool-define-as default dir --target /vmstore/images
+virsh pool-define-as iso dir --target /vmstore/iso
+virsh pool-autostart default && virsh pool-start default
+virsh pool-autostart iso && virsh pool-start iso
+virsh pool-list       # both active, autostart yes
+```
+
+### 2.5 Bind the windows nvme to vfio-pci at boot
+
+The host must never mount, probe or format the Samsung drive, so `vfio-pci`
+claims its controller before the `nvme` driver can. Binding by vendor:device
+id is enough because the two nvme drives are different models
+([Arch wiki: Binding vfio-pci via device ID](https://wiki.archlinux.org/title/PCI_passthrough_via_OVMF#Binding_vfio-pci_via_device_ID)).
+
+`/etc/modprobe.d/vfio.conf`:
+
+```
+options vfio-pci ids=144d:a808
+softdep nvme pre: vfio-pci
+```
+
+The `softdep` line makes sure `vfio-pci` is loaded whenever `nvme` is about to
+be, and the modules go into the initramfs so that the drive is taken before
+the real root even exists ([Arch wiki: Loading vfio-pci early](https://wiki.archlinux.org/title/PCI_passthrough_via_OVMF#Loading_vfio-pci_early)).
+The `modconf` hook, already in `HOOKS`, copies `/etc/modprobe.d` into the
+image, so the ids are known there too.
+
+`/etc/mkinitcpio.conf.d/vfio.conf`:
+
+```
+MODULES+=(vfio_pci vfio vfio_iommu_type1)
+```
+
+```bash
+sudo mkinitcpio -P
+```
+
+Reboot and check:
+
+```bash
+lspci -nnk -s 02:00.0        # Kernel driver in use: vfio-pci
+lsblk                        # the Samsung drive is gone
+sudo dmesg | grep -i vfio    # vfio_pci: add [144d:a808[ffff:ffff]] ...
+```
+
+> The Arch wiki warns that early loading vfio can freeze the framebuffer and
+> hide the luks password prompt. That happens when vfio takes a gpu, here it
+> only takes the nvme, and `amdgpu` is early loaded anyway.
+
+### 2.6 Hyprland on the igpu only
+
+A pci device can only change driver when no process has it open, and hyprland
+keeps the dgpu open all the time because it manages it for the hdmi port
+(see [setup-graphics readme](../setups/setup-graphics/readme.md)). This is
+the same reason why supergfxctl asks for a logout when switching to its vfio
+mode. Instead of logging out before every vm, hyprland is told to leave the
+dgpu alone when a marker file exists, so the switch happens on vm start
+without any logout.
+
+`~/.config/hypr/conf/environments/default.lua` is written by
+`setup-graphics-rog.sh`, so make the change in the file and in the script
+(`setups/setup-graphics/setup-graphics-rog.sh`, the heredoc that writes
+`default.lua`), otherwise a rerun of the script undoes it. Replace the line
+
+```lua
+for _, dev in ipairs(other) do table.insert(amd, dev) end
+```
+
+with
+
+```lua
+-- With ~/.config/hypr/igpu-only present hyprland leaves the dgpu alone, so
+-- that a vm can take it without a logout. The hdmi port then only works
+-- inside the vm that has the dgpu.
+local igpu_only = io.open(os.getenv("HOME") .. "/.config/hypr/igpu-only", "r")
+if igpu_only then
+    igpu_only:close()
+else
+    for _, dev in ipairs(other) do table.insert(amd, dev) end
+end
+```
+
+Create the marker and log out and in:
+
+```bash
+touch ~/.config/hypr/igpu-only
+```
+
+Check that hyprland only has the amd card and that nothing holds the dgpu:
+
+```bash
+tr '\0' '\n' < /proc/$(pidof Hyprland)/environ | grep AQ_DRM_DEVICES   # one card only
+sudo fuser -v /dev/nvidia* /dev/dri/by-path/pci-0000:01:00.0-*          # nothing, or nvidia-powerd only
+dgpu                                                                     # still D3cold
+```
+
+What changes on the host: the hdmi port does nothing while hyprland runs on
+the igpu, it belongs to whichever vm has the dgpu (a monitor plugged in shows
+that vm directly). Cuda and `gpu-run` keep working as before, they do not need
+hyprland to manage the card. Removing the marker file and logging in again
+gives the old behaviour back.
+
+### 2.7 libvirt hook that frees the dgpu
+
+libvirt itself unbinds `nvidia` and binds `vfio-pci` when a vm with
+`managed="yes"` pci devices starts, and reverses it when the vm stops. What it
+cannot do is stop `nvidia-powerd`, which keeps the driver open, or tell why an
+unbind failed. That is the job of the hook, which libvirt runs on every vm
+event with the vm xml on stdin ([libvirt: hooks](https://libvirt.org/hooks.html)).
+The hook only acts for vms that have the dgpu attached, so linux vms without
+it are not touched.
+
+`/etc/libvirt/hooks/qemu`:
+
+```bash
+#!/bin/bash
+# Frees the nvidia dgpu for a vm that has it attached and gives it back when
+# the vm stops. libvirt binds vfio-pci and rebinds nvidia on its own
+# (managed="yes"), this only handles what would keep the nvidia driver busy.
+# libvirt runs it as: qemu <vm> <operation> <phase> - with the vm xml on stdin.
+
+vm="$1" operation="$2" phase="$3"
+gpu="0000:01:00.0"
+
+uses_gpu=$(xmllint --xpath \
+    "count(//hostdev/source/address[@bus='0x01'][@slot='0x00'][@function='0x0'])" -)
+[ "$uses_gpu" != "0" ] || exit 0
+
+shopt -s nullglob
+case "$operation/$phase" in
+    prepare/begin)
+        systemctl stop nvidia-powerd.service
+        echo on > "/sys/bus/pci/devices/$gpu/power/control"    # wake it from D3cold
+        if fuser -s /dev/nvidia* /dev/dri/by-path/pci-"$gpu"-* 2>/dev/null; then
+            echo "$vm: the dgpu is in use on the host, see: fuser -v /dev/nvidia* /dev/dri/by-path/pci-$gpu-*" >&2
+            systemctl start nvidia-powerd.service
+            exit 1
+        fi
+        ;;
+    release/end)
+        systemctl start nvidia-powerd.service
+        ;;
+esac
+```
+
+```bash
+sudo chmod +x /etc/libvirt/hooks/qemu
+sudo systemctl restart libvirtd.service     # hooks are picked up at daemon start
+```
+
+- `prepare/begin` runs before libvirt touches any device. A non zero exit
+  aborts the vm start, so a dgpu that is still in use shows up as a clear
+  error in virt-manager instead of a crashed compositor.
+- `release/end` runs after libvirt has given the dgpu back to `nvidia`. The
+  udev rule of `nvidia-laptop-power-cfg` sets its runtime power management
+  again on that bind, so the card goes back to sleep.
+- `xmllint` comes with `libxml2`, a dependency of libvirt. Hooks must not call
+  `virsh`, libvirt would deadlock, hence the sysfs and xml parsing.
+
+### 2.8 Looking Glass on the host
+
+Looking Glass moves frames from the vm to the host through a shared memory
+device, whose size depends on the resolution. For the 2560x1440 panel it is
+64 MiB ([Looking Glass: determining memory](https://looking-glass.io/docs/B7/install_libvirt/#determining-memory)):
+
+```
+2560 x 1440 x 4 bytes x 2 frames = 29.5 MiB, + 10 MiB, rounded up to a power of 2 = 64 MiB
+```
+
+The kvmfr module creates that device
+([Looking Glass: IVSHMEM with the KVMFR module](https://looking-glass.io/docs/B7/ivshmem_kvmfr/)).
+Three files, then load it:
+
+`/etc/modprobe.d/kvmfr.conf`:
+
+```
+options kvmfr static_size_mb=64
+```
+
+`/etc/modules-load.d/kvmfr.conf`:
+
+```
+kvmfr
+```
+
+`/etc/udev/rules.d/99-kvmfr.rules`, so that both qemu (runs as
+`libvirt-qemu`, member of `kvm`) and the user (added to `kvm` in 2.2) can use
+it:
+
+```
+SUBSYSTEM=="kvmfr", GROUP="kvm", MODE="0660"
+```
+
+```bash
+sudo modprobe kvmfr
+ls -l /dev/kvmfr0          # crw-rw---- root kvm, a character device
+```
+
+qemu runs inside a cgroup that only allows a fixed list of devices, so
+`/dev/kvmfr0` has to be added to it. In `/etc/libvirt/qemu.conf` uncomment
+the `cgroup_device_acl` block and add the device, the result looks like this:
+
+```
+cgroup_device_acl = [
+    "/dev/null", "/dev/full", "/dev/zero",
+    "/dev/random", "/dev/urandom",
+    "/dev/ptmx", "/dev/kvm",
+    "/dev/userfaultfd",
+    "/dev/kvmfr0"
+]
+```
+
+```bash
+sudo systemctl restart libvirtd.service
+```
+
+Client settings, `~/.config/looking-glass/client.ini`
+([Looking Glass: client usage](https://looking-glass.io/docs/B7/usage/)).
+The escape key is what toggles input capture and prefixes every shortcut, the
+default `ScrollLock` does not exist on this keyboard. The chosen key is not
+passed to the vm:
+
+```ini
+[app]
+shmFile=/dev/kvmfr0
+
+[win]
+fullScreen=yes
+
+[input]
+escapeKey=KEY_RIGHTCTRL
+```
+
+`looking-glass-client -m help` lists the valid key names. The windows side of
+Looking Glass must be the exact same version as the client, check it with
+`pacman -Q looking-glass`.
+
+### 2.9 Saving the vm definitions
+
+libvirt keeps the vm definitions in `/etc/libvirt/qemu/`, which does not
+survive a reinstall. `vm-export` copies them into `/vmstore/xml`, run it after
+every change made in virt-manager or with `virsh edit`.
+
+`/usr/local/bin/vm-export`:
+
+```bash
+#!/bin/sh
+# Saves the definition of every vm into /vmstore/xml, so that a fresh host
+# can take them back with: virsh define /vmstore/xml/<name>.xml
+
+set -e
+export LIBVIRT_DEFAULT_URI=qemu:///system
+for vm in $(virsh list --all --name); do
+    virsh dumpxml --inactive "$vm" > "/vmstore/xml/$vm.xml"
+    echo "saved /vmstore/xml/$vm.xml"
+done
+```
+
+```bash
+sudo chmod +x /usr/local/bin/vm-export
+```
+
+`--inactive` writes the stored definition, without the runtime details of a
+running vm.
+
+### 2.10 Everything the host setup produced
+
+The list to keep in mind for a reinstall, all of it is in this guide:
+
+| Where | What |
+|---|---|
+| `/etc/fstab` | The `/vmstore` line. |
+| `/etc/modprobe.d/vfio.conf`, `/etc/mkinitcpio.conf.d/vfio.conf` | The windows nvme on vfio-pci. |
+| `~/.config/hypr/conf/environments/default.lua`, `~/.config/hypr/igpu-only` | Hyprland on the igpu. |
+| `/etc/libvirt/hooks/qemu` | The dgpu hook. |
+| `/etc/modprobe.d/kvmfr.conf`, `/etc/modules-load.d/kvmfr.conf`, `/etc/udev/rules.d/99-kvmfr.rules`, `/etc/libvirt/qemu.conf` | Looking Glass. |
+| `~/.config/looking-glass/client.ini` | Looking Glass client. |
+| `/usr/local/bin/vm-export` | Export of the definitions. |
+
+## 3. Windows 11 vm
+
+### 3.1 New install
+
+#### Isos
+
+Download the windows 11 iso from
+[microsoft](https://www.microsoft.com/software-download/windows11) and the
+virtio drivers iso from the
+[virtio-win project](https://github.com/virtio-win/virtio-win-pkg-scripts)
+into the iso pool. Windows ships no driver for virtio devices, so the second
+iso is needed during the install for the network card and afterwards for the
+guest tools:
+
+```bash
+mv ~/Downloads/Win11*.iso /vmstore/iso/win11.iso
+curl -L -o /vmstore/iso/virtio-win.iso \
+    https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso
+virsh pool-refresh iso
+```
+
+#### Create the vm in virt-manager
+
+Once: `Edit > Preferences > General > Enable XML editing`, it adds an XML tab
+to every device page.
+
+`File > New Virtual Machine`:
+
+1. `Local install media`, browse to `win11.iso` in the `iso` pool. The
+   detected os is `Windows 11`, which makes virt-manager pick the secure boot
+   firmware and add a tpm 2.0 on its own.
+2. Memory `16384`, CPUs `12`.
+3. Uncheck `Enable storage for this virtual machine`. The disk is the
+   passed-through nvme.
+4. Name `win11`, check `Customize configuration before install`, `Finish`.
+
+In the customize window:
+
+1. `Overview`: chipset `Q35`, firmware `UEFI` (the secure boot variant,
+   `OVMF_CODE.secboot.4m.fd`). In its XML tab, inside `<os>`, add or edit the
+   `nvram` line so that the uefi variables land on the vm store:
+   ```xml
+   <nvram>/vmstore/nvram/win11_VARS.fd</nvram>
+   ```
+   libvirt fills in the template on its own; with the manual firmware form the
+   line is `<nvram template="/usr/share/edk2/x64/OVMF_VARS.4m.fd">/vmstore/nvram/win11_VARS.fd</nvram>`.
+2. `CPUs`: uncheck `Copy host CPU configuration` and set the model to
+   `host-passthrough`. `Topology > Manually set`: 1 socket, 6 cores,
+   2 threads.
+3. `TPM`: model `CRB`, version `2.0`. In its XML tab, move the state to the vm
+   store:
+   ```xml
+   <tpm model="tpm-crb">
+     <backend type="emulator" version="2.0">
+       <source type="dir" path="/vmstore/tpm/win11"/>
+     </backend>
+   </tpm>
+   ```
+   libvirt creates the folder with the right owner
+   ([libvirt: TPM device](https://libvirt.org/formatdomain.html#tpm-device)).
+4. `NIC`: device model `virtio`.
+5. `Add Hardware > PCI Host Device`: `0000:02:00.0 Samsung Electronics ... NVMe`.
+6. `Add Hardware > Storage`: device type `CDROM device`, select
+   `virtio-win.iso` from the `iso` pool.
+7. Remove `USB Redirector 1` and `2`.
+8. `Begin Installation`.
+
+#### Install windows
+
+The spice window of virt-manager shows the vm. Press a key when the firmware
+says `Press any key to boot from CD or DVD`, the nvme appears in the disk
+list of the installer as a normal drive because it is a real one.
+
+- Windows has no network until the virtio driver is loaded. At the disk step
+  click `Load driver` and browse to `E:\NetKVM\w11\amd64` (the virtio-win cd),
+  then continue. The alternative is an offline install with a local account:
+  `Shift+F10`, then `start ms-cxh:localonly`.
+- After the first login open the virtio-win cd and run
+  `virtio-win-guest-tools.exe`. It installs every virtio driver, the spice
+  agent (clipboard, resolution) and the qemu guest agent (clean shutdown from
+  virt-manager).
+- Run windows update, then shut down the vm and export the definition:
+
+```bash
+vm-export
+```
+
+#### Add the dgpu and tune the vm
+
+With the vm off, `virsh edit win11` (or the XML tabs in virt-manager). The
+blocks below replace or add to what virt-manager generated, the parts not
+shown stay as they are.
+
+The first line gets the qemu namespace, needed for the Looking Glass device:
+
+```xml
+<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
+```
+
+Pin the vcpus to cores 2 to 7 (cpus 4 to 15 of `lscpu -e`, a core is a pair
+of consecutive cpus on this amd) and keep cores 0 and 1 for the host, hyprland
+and the Looking Glass client. `topoext` tells windows which vcpus are siblings
+([Arch wiki: CPU pinning](https://wiki.archlinux.org/title/PCI_passthrough_via_OVMF#CPU_pinning),
+[Improving performance on AMD CPUs](https://wiki.archlinux.org/title/PCI_passthrough_via_OVMF#Improving_performance_on_AMD_CPUs)):
+
+```xml
+<vcpu placement="static">12</vcpu>
+<cputune>
+  <vcpupin vcpu="0" cpuset="4"/>
+  <vcpupin vcpu="1" cpuset="5"/>
+  <vcpupin vcpu="2" cpuset="6"/>
+  <vcpupin vcpu="3" cpuset="7"/>
+  <vcpupin vcpu="4" cpuset="8"/>
+  <vcpupin vcpu="5" cpuset="9"/>
+  <vcpupin vcpu="6" cpuset="10"/>
+  <vcpupin vcpu="7" cpuset="11"/>
+  <vcpupin vcpu="8" cpuset="12"/>
+  <vcpupin vcpu="9" cpuset="13"/>
+  <vcpupin vcpu="10" cpuset="14"/>
+  <vcpupin vcpu="11" cpuset="15"/>
+  <emulatorpin cpuset="0-3"/>
+</cputune>
+<cpu mode="host-passthrough" check="none" migratable="off">
+  <topology sockets="1" dies="1" clusters="1" cores="6" threads="2"/>
+  <cache mode="passthrough"/>
+  <feature policy="require" name="topoext"/>
+</cpu>
+```
+
+Hyper-V enlightenments, paravirtual interfaces that windows uses when it
+finds them ([libvirt: Hyper-V features](https://libvirt.org/formatdomain.html#hypervisor-features)).
+Replace the `<hyperv>` block inside `<features>`:
+
+```xml
+<hyperv mode="custom">
+  <relaxed state="on"/>
+  <vapic state="on"/>
+  <spinlocks state="on" retries="8191"/>
+  <vpindex state="on"/>
+  <runtime state="on"/>
+  <synic state="on"/>
+  <stimer state="on">
+    <direct state="on"/>
+  </stimer>
+  <reset state="on"/>
+  <frequencies state="on"/>
+  <reenlightenment state="on"/>
+  <tlbflush state="on"/>
+  <ipi state="on"/>
+</hyperv>
+```
+
+Inside `<devices>`, the dgpu with both of its functions. `managed="yes"` is
+what makes libvirt do the driver switching:
+
+```xml
+<hostdev mode="subsystem" type="pci" managed="yes">
+  <source>
+    <address domain="0x0000" bus="0x01" slot="0x00" function="0x0"/>
+  </source>
+</hostdev>
+<hostdev mode="subsystem" type="pci" managed="yes">
+  <source>
+    <address domain="0x0000" bus="0x01" slot="0x00" function="0x1"/>
+  </source>
+</hostdev>
+```
+
+Still inside `<devices>`, what Looking Glass asks for
+([Looking Glass: libvirt installation](https://looking-glass.io/docs/B7/install_libvirt/#keyboard-mouse-display-audio)):
+the emulated display stays as `vga` (a fallback that shows in the spice
+window), the tablet goes away, virtio keyboard and mouse come in, the sound
+card plays through spice and the memory balloon is off because it hurts
+passthrough. Keep the `<graphics type="spice">` device, it carries keyboard,
+mouse, clipboard and audio to the client.
+
+```xml
+<video>
+  <model type="vga"/>
+</video>
+<input type="mouse" bus="virtio"/>
+<input type="keyboard" bus="virtio"/>
+<sound model="ich9">
+  <audio id="1"/>
+</sound>
+<audio id="1" type="spice"/>
+<memballoon model="none"/>
+```
+
+(remove `<input type="tablet" bus="usb">...</input>` and any other `<sound>`
+or `<audio>` element).
+
+Finally the shared memory device, right before `</domain>`. The size is the
+64 MiB of 2.8 in bytes:
+
+```xml
+<qemu:commandline>
+  <qemu:arg value="-device"/>
+  <qemu:arg value="{'driver':'ivshmem-plain','id':'shmem0','memdev':'looking-glass'}"/>
+  <qemu:arg value="-object"/>
+  <qemu:arg value="{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'/dev/kvmfr0','size':67108864,'share':true}"/>
+</qemu:commandline>
+```
+
+Save, export, and start the vm:
+
+```bash
+vm-export
+virsh start win11
+lspci -nnk -s 01:00.0        # Kernel driver in use: vfio-pci while the vm runs
+```
+
+Open the vm in virt-manager, the spice window still works through the
+emulated display. Inside windows install the nvidia driver from
+[nvidia.com](https://www.nvidia.com/Download/index.aspx) (GeForce RTX 3070 Ti
+Laptop GPU), reboot, and check in the device manager that the gpu shows no
+error. Error `Code 43` is handled in [3.1 Code 43](#code-43).
+
+#### Looking Glass inside windows
+
+1. Download the windows host installer from
+   [looking-glass.io/downloads](https://looking-glass.io/downloads), same
+   version as `pacman -Q looking-glass`. Run `looking-glass-host-setup.exe`
+   as administrator with the default options, it installs the ivshmem driver
+   and a service that starts on boot
+   ([Looking Glass: host installation](https://looking-glass.io/docs/B7/install_host/)).
+2. The dgpu has no monitor, so windows has no display on it to capture. Install
+   the [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver)
+   (`VDD Control` from its releases page): install the driver, add one
+   display of `2560x1440` at `165 Hz`. An hdmi dummy plug does the same job in
+   hardware.
+3. `Settings > System > Display`: select the virtual display, `Multiple
+   displays > Show only on 2` (the number of the virtual one), so that the
+   emulated vga is off and the desktop lives on the dgpu.
+4. On the host:
+
+```bash
+looking-glass-client
+```
+
+The window fills the panel, `RightCtrl` toggles between the vm and hyprland,
+`RightCtrl+Q` quits the client, `RightCtrl+F` toggles full screen. Audio and
+clipboard go through spice, nothing else to configure.
+
+#### Code 43
+
+Mobile nvidia gpus check for a battery, and a vm has none, which on some
+models leaves the driver with `Code 43`. The asus-linux guide provides an acpi
+table that adds a fake battery ([asus-linux: Code 43](https://asus-linux.org/guides/vfio-guide/)):
+
+```bash
+sudo curl -Lo /vmstore/acpitable.bin https://asus-linux.org/files/vfio/acpitable.bin
+```
+
+Add to the `<qemu:commandline>` block:
+
+```xml
+<qemu:arg value="-acpitable"/>
+<qemu:arg value="file=/vmstore/acpitable.bin"/>
+```
+
+If that is not enough, hide the hypervisor from the driver as the
+[Arch wiki](https://wiki.archlinux.org/title/PCI_passthrough_via_OVMF#Video_card_driver_virtualisation_detection)
+describes: `<vendor_id state="on" value="0123456789ab"/>` inside `<hyperv>`
+and `<kvm><hidden state="on"/></kvm>` inside `<features>`.
+
+### 3.2 Using it
+
+```bash
+virsh start win11 && looking-glass-client
+```
+
+or from virt-manager. Shut down from inside windows, or `virsh shutdown win11`
+(the guest agent makes it a clean one). Afterwards the dgpu is back on the
+host:
+
+```bash
+lspci -nnk -s 01:00.0        # Kernel driver in use: nvidia
+dgpu                         # D3cold again after a few seconds
+```
+
+Every change to the vm in virt-manager or `virsh edit` is followed by
+`vm-export`. Never `virsh undefine win11 --nvram` or `--tpm`, those delete the
+uefi variables and the tpm state, `virsh undefine win11 --keep-nvram` is the
+safe form if the definition ever has to be removed.
+
+> Windows 11 turns on device encryption (bitlocker) by itself on some
+> editions when signed in with a microsoft account, and its key is sealed by
+> the emulated tpm in `/vmstore/tpm/win11`. Keep that folder, and keep the
+> recovery key that windows stores in the microsoft account, or turn device
+> encryption off in `Settings > Privacy & security > Device encryption`.
+
+### 3.3 Reuse after a host reinstall
+
+Windows itself is untouched by a host reinstall, it is on its own drive. What
+it needs from the host is the definition, the uefi variables and the tpm
+state, all on `/vmstore`. See [5. After a host reinstall](#5-after-a-host-reinstall).
+
+## 4. Linux vms
+
+### 4.1 New install
+
+Nothing is passed through, virt-manager does everything:
+
+1. `File > New Virtual Machine > Local install media`, pick the iso from the
+   `iso` pool (copy it to `/vmstore/iso` and `virsh pool-refresh iso` first).
+2. Memory and cpus as needed, for example `4096` and `4`.
+3. Storage: `Select or create custom storage > Manage`, pool `default`, `+`
+   to create a volume, format `qcow2`, size as needed. It lands in
+   `/vmstore/images/<name>.qcow2`.
+4. Name the vm, `Customize configuration before install`.
+5. In the customize window: `Overview` firmware `UEFI` (`OVMF_CODE.4m.fd`,
+   secure boot is only needed to test secure boot), chipset `Q35`. `CPUs`
+   model `host-passthrough`. Disk bus `VirtIO`, NIC model `virtio`. `Video`
+   model `Virtio` with `3D acceleration` and, in `Display Spice`, `OpenGL`
+   on, for a desktop that renders on the igpu.
+6. `Begin Installation`, then `vm-export` once installed.
+
+The same from the terminal ([virt-install](https://virt-manager.org/)):
+
+```bash
+virt-install --name fedora --memory 4096 --vcpus 4 --cpu host-passthrough \
+    --disk pool=default,size=40,format=qcow2,bus=virtio \
+    --cdrom /vmstore/iso/Fedora-Workstation-Live.iso \
+    --osinfo detect=on,require=off --boot uefi \
+    --graphics spice --video virtio
+```
+
+> The uefi variables of these vms stay in `/var/lib/libvirt/qemu/nvram/` on
+> the host, which is fine for test vms: after a reinstall the firmware boots
+> them through the fallback `\EFI\BOOT\BOOTX64.EFI` that most distros install,
+> and a distro that does not can be booted once from the firmware menu (`Boot
+> Manager`) to reinstall its bootloader. A vm worth more than that gets the
+> same `<nvram>/vmstore/nvram/<name>_VARS.fd</nvram>` line as the windows vm
+> before its install.
+
+### 4.2 Reuse after a host reinstall
+
+The disk is in `/vmstore/images`, the definition in `/vmstore/xml`, both
+referenced by absolute paths that are the same on the new host. See
+[5. After a host reinstall](#5-after-a-host-reinstall).
+
+### 4.3 The dgpu in a linux vm
+
+The hook and libvirt do not care which vm asks for the dgpu, so the two
+`<hostdev>` blocks of [3.1](#add-the-dgpu-and-tune-the-vm) work in a linux vm
+too. What differs is the screen: Looking Glass has no finished linux host
+application, so the vm shows its dgpu output on a monitor plugged into the
+hdmi port, or uses the dgpu only for cuda while its desktop stays on the
+virtio display. Inside the vm install the distro's nvidia packages, the open
+kernel modules for this ampere card.
+
+## 5. After a host reinstall
+
+What survives on its own, given that the install of the new host leaves
+`lv_vmstore` and the Samsung nvme alone:
+
+| What | Where |
+|---|---|
+| Windows itself | The Samsung nvme, `02:00.0`. |
+| Linux vm disks | `/vmstore/images/` |
+| Isos | `/vmstore/iso/` |
+| Uefi variables of the windows vm | `/vmstore/nvram/win11_VARS.fd` |
+| Tpm state of the windows vm | `/vmstore/tpm/win11/` |
+| Definitions of every vm | `/vmstore/xml/<name>.xml`, as long as `vm-export` ran after the last change |
+
+Steps on the fresh host:
+
+1. The whole of [2. Host setup](#2-host-setup), in order. The reboot of 2.5 and
+   the logout of 2.6 are needed before any vm with the dgpu starts.
+2. Take the definitions back:
+   ```bash
+   virsh define /vmstore/xml/win11.xml
+   virsh define /vmstore/xml/<linux vm>.xml
+   virsh pool-refresh default && virsh pool-refresh iso
+   ```
+3. Start them. Windows finds the same machine uuid (it is in the xml, so the
+   activation holds), the same uefi boot entry and the same tpm.
+
+If the host is not Arch, the xml carries a few Arch paths to adapt before
+`virsh define`: the firmware in `<loader>` and the nvram template (or delete
+both lines and let `firmware="efi"` on the `<os>` tag pick the local one),
+`/usr/bin/qemu-system-x86_64` in `<emulator>`, and the `/dev/kvmfr0` device
+and hook, which are set up the same way on any distro with the Looking Glass
+and libvirt docs linked above.
+
+## 6. What else could be passed through
+
+Every device below is alone in its iommu group, so it can be given to a vm as
+a pci device the same way as the nvme, with the host losing it while the vm
+runs. None is needed now, this is the list for later.
+
+| Device | PCI address | Use in a vm | Cost for the host |
+|---|---|---|---|
+| USB controllers `07:00.0`, `07:00.3`, `07:00.4`, `06:00.4` | groups 25, 26, 27, 22 | Real usb ports with hotplug inside the vm, the lowest latency for keyboards, mice, audio interfaces or vr. Find which physical port hangs off which controller with `lsusb -t` and `udevadm info -q path -n /dev/bus/usb/<bus>/<dev>`. | The ports on that controller are gone from the host while the vm runs. |
+| USB controller `06:00.3` | group 21 | The internal keyboard (`ASUSTek N-KEY Device`) is on this one. Passing it gives the vm the laptop keyboard directly. | The host loses the keyboard until the vm stops, only do it with an external keyboard at hand. The touchpad is i2c and stays on the host. |
+| Realtek 2.5 GbE `04:00.0` | group 17 | A real network card for a vm, for router or firewall distros, or for measuring network performance. | No wired network on the host, the wifi stays. |
+| MediaTek MT7922 wifi `03:00.0` | group 16 | Wifi driver testing, wifi captures inside the vm. | No wifi on the host, and the bluetooth of the same module is a usb device that can be passed separately. |
+| Ryzen HD audio `06:00.6` | group 24 | The laptop speakers and microphone jack driven directly by windows. | No audio on the host. Spice audio already does the job without it. |
+
+Not candidates: the igpu `06:00.0` drives the panel, the Micron nvme
+`05:00.0` is the host, `06:00.2` is the security processor.
+
+For single peripherals a usb device passthrough is simpler than a whole
+controller: `Add Hardware > USB Host Device` in virt-manager hands one
+device (webcam, bluetooth, game controller, usb stick) to the vm, no iommu
+group involved, and it can be attached and detached while the vm runs. A
+device listed in the xml has to be plugged in when the vm starts, or the
+start fails.
+
+## 7. Troubleshooting
+
+- **`Hook script execution failed` when starting a vm.** Something on the
+  host has the dgpu open. `sudo fuser -v /dev/nvidia* /dev/dri/by-path/pci-0000:01:00.0-*`
+  names it. If it is `Hyprland`, the marker file of 2.6 is missing or the
+  session was not restarted. `journalctl -u libvirtd` has the message of the
+  hook.
+- **The hook does nothing.** libvirt only reads `/etc/libvirt/hooks` when it
+  starts: `sudo systemctl restart libvirtd`. Check it is executable.
+- **The dgpu does not come back after the vm stops.** `lspci -nnk -s 01:00.0`
+  still says `vfio-pci`. Give it back by hand:
+  ```bash
+  echo 0000:01:00.0 | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind
+  echo 0000:01:00.1 | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind
+  echo 0000:01:00.0 | sudo tee /sys/bus/pci/drivers_probe
+  echo 0000:01:00.1 | sudo tee /sys/bus/pci/drivers_probe
+  ```
+- **Looking Glass shows `Waiting for host`.** The host service inside windows
+  is not running or captures nothing: the desktop must be on the virtual
+  display of the dgpu (`Show only on 2`), and both versions must match.
+- **`/dev/kvmfr0` is a regular file.** A vm started before the module was
+  loaded and qemu created a file in its place. `sudo rm /dev/kvmfr0 && sudo
+  modprobe -r kvmfr && sudo modprobe kvmfr`
+  ([Looking Glass: kvmfr](https://looking-glass.io/docs/B7/ivshmem_kvmfr/)).
+- **Windows sees no network during the install.** The virtio-win cd is not
+  attached or the `NetKVM` driver was not loaded, see [3.1](#install-windows).
+- **The Samsung drive shows up in `lsblk`.** vfio-pci did not take it: check
+  `/etc/modprobe.d/vfio.conf`, that the mkinitcpio drop-in exists, and that
+  `mkinitcpio -P` ran after both.
+- **A linux vm with grub hangs right after the grub menu** (Debian, Fedora,
+  RHEL family and their live isos) with `edk2-ovmf` 202505 or newer. Known
+  Arch packaging issue; the workaround is the `edk2-ovmf-fedora` aur package
+  next to `edk2-ovmf` and that firmware in the `<loader>` of that vm
+  ([Arch wiki: QEMU troubleshooting](https://wiki.archlinux.org/title/QEMU/Troubleshooting#Linux_guest_boot_hangs_with_GRUB_in_UEFI_mode)).
+- **Stutter in the windows vm.** Check the pinning is in place
+  (`virsh vcpupin win11`), that `memballoon` is `none`, and that hyprland does
+  not run something heavy on cpus 4 to 15 (`taskset` can keep it on `0-3`).
+  Static huge pages give at most a couple of percent on top and lock the
+  memory even while the vm is off, so they are left out
+  ([Arch wiki: Huge memory pages](https://wiki.archlinux.org/title/PCI_passthrough_via_OVMF#Huge_memory_pages)).

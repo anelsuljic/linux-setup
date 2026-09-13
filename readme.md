@@ -21,4 +21,5 @@ Other readmes:
 
 - [Graphics setup](setups/setup-graphics/readme.md)
 - [SDDM setup](setups/setup-sddm/readme.md)
+- [Virtualization with qemu/kvm](other/virtualization.md)
 - [Commands used](commands-used.md)
