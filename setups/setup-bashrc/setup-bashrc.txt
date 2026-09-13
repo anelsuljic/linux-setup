@@ -71,3 +71,24 @@ dgpu()
     printf 'dGPU: power=%s runtime=%s control=%s\n' \
         "$(<"$d/power_state")" "$(<"$d/power/runtime_status")" "$(<"$d/power/control")"
 }
+
+# Prints what has the dgpu open, root processes included.
+dgpu-users()
+{
+    sudo fuser -v /dev/nvidia* /dev/dri/by-path/pci-0000:01:00.0-*
+}
+
+# Virtualization
+export LIBVIRT_DEFAULT_URI=qemu:///system
+
+act-vm-env()
+{
+    touch ~/.config/hypr/igpu-only
+    echo -e "Log out and re-log in to apply changes."
+}
+
+des-vm-env()
+{
+    rm -f ~/.config/hypr/igpu-only
+    echo -e "Log out and re-log in to apply changes."
+}
