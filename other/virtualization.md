@@ -190,6 +190,7 @@ sudo chown "$USER" /vmstore/iso /vmstore/xml
 | `nvram/` | Uefi variables of the vms (`<name>_VARS.fd`), the boot entries live here. |
 | `tpm/` | State of the emulated tpm of the windows vm. |
 | `xml/` | Exported definitions, one `<name>.xml` per vm, see [2.9](#29-saving-the-vm-definitions). |
+| `share/` | Folder the windows vm mounts through virtiofs, see [3.4](#34-sharing-files-with-the-host). Created there. |
 
 Storage pools tell libvirt and virt-manager where to create and look for
 files ([Arch wiki: libvirt, Storage pools](https://wiki.archlinux.org/title/Libvirt#Storage_pools)).
@@ -927,6 +928,67 @@ Windows itself is untouched by a host reinstall, it is on its own drive. What
 it needs from the host is the definition, the uefi variables and the tpm
 state, all on `/vmstore`. See [5. After a host reinstall](#5-after-a-host-reinstall).
 
+### 3.4 Sharing files with the host
+
+Windows mounts a folder of the host through virtiofs, a shared file system
+that works over the memory of the vm instead of the network, so it needs no
+samba and no addresses ([libvirt: virtiofs](https://libvirt.org/kbase/virtiofs.html)).
+The host side is `virtiofsd`, already installed as a dependency of qemu, and
+libvirt starts it with the vm. The windows side is the driver and service that
+the virtio-win guest tools installed in 3.1, plus [WinFsp](https://winfsp.dev/),
+the framework they run on ([virtio-win: virtiofs](https://github.com/virtio-win/kvm-guest-drivers-windows/wiki/Virtiofs:-Shared-file-system)).
+
+First, create a folder in your host. You can create it where you want, for example on the vm store so that it survives a reinstall:
+
+```bash
+sudo mkdir /vmstore/share
+sudo chown "$USER":users /vmstore/share
+```
+
+With the vm off, `virsh edit win11`. virtiofs needs the memory of the vm to
+be shareable with the daemon, which is what `memoryBacking` does; add it
+right after `<currentMemory>`:
+
+```xml
+<memoryBacking>
+  <source type="memfd"/>
+  <access mode="shared"/>
+</memoryBacking>
+```
+
+and the share inside `<devices>`. `target dir` is only a tag, the name under
+which windows sees the share:
+
+```xml
+<filesystem type="mount" accessmode="passthrough">
+  <driver type="virtiofs" queue="1024"/>
+  <source dir="/vmstore/share"/>
+  <target dir="share"/>
+</filesystem>
+```
+
+`vm-export`, start the vm, and in windows, in a terminal run as
+administrator:
+
+```
+winget install WinFsp.WinFsp
+reg add HKLM\Software\virtiofs /v Owner /t REG_SZ /d 1000:982
+reg add HKLM\Software\virtiofs /v FileSystemName /t REG_SZ /d NTFS
+Set-Service -Name "VirtioFsSvc" -StartupType Automatic
+Start-Service -Name "VirtioFsSvc"
+```
+
+- `Owner` is the uid and gid that windows gives to everything it creates,
+  `id -u` and `id -g` of the user on the host (`1000` and `982`, the `users`
+  group), so the files belong to you and not to root.
+- `FileSystemName` makes the share report itself as ntfs, without it windows
+  refuses to run executables from it as administrator.
+- The service was installed by the guest tools but could not run without
+  WinFsp, these two lines start it now and on every boot.
+
+The share appears as drive `Z:`. Check from the host that a file created in
+windows lands in `/vmstore/share` owned by the user.
+
 ## 4. Linux vms
 
 ### 4.1 New install
@@ -991,6 +1053,7 @@ What survives on its own, given that the install of the new host leaves
 | Windows itself | The Samsung nvme, `02:00.0`. |
 | Linux vm disks | `/vmstore/images/` |
 | Isos | `/vmstore/iso/` |
+| Files shared with the windows vm | `/vmstore/share/` |
 | Uefi variables of the windows vm | `/vmstore/nvram/win11_VARS.fd` |
 | Tpm state of the windows vm | `/vmstore/tpm/win11/` |
 | Definitions of every vm | `/vmstore/xml/<name>.xml`, as long as `vm-export` ran after the last change |
