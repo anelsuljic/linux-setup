@@ -1,0 +1,1 @@
+- `config/ohmyposh` contains the contents that should be placed at `~/.config/ohmyposh`.
