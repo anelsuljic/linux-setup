@@ -1,0 +1,5 @@
+#!/bin/bash
+set -e
+lvremove -y volgroup0/root_pre_update   # discard the snapshot (commits the update)
+rm -rf /boot.bak                        # and the /boot backup
+echo "Snapshot removed. Update kept."

@@ -1,0 +1,9 @@
+#!/bin/bash
+# /usr/local/bin/safe-update
+set -e
+lvremove -y volgroup0/root_pre_update 2>/dev/null || true
+lvcreate -s -n root_pre_update -L 15G volgroup0/lv_root
+rm -rf /boot.bak
+cp -ax /boot /boot.bak
+[[ -n $SUDO_USER ]] || { echo "Run this with sudo, not as plain root (yay needs a normal user)."; exit 1; }
+sudo -Hu "$SUDO_USER" yay -Syu

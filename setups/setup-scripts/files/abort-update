@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+lvs volgroup0/root_pre_update >/dev/null 2>&1 || { echo "No snapshot found, nothing to roll back."; exit 1; }
+rsync -a --delete --exclude=/efi /boot.bak/ /boot/     # put the old kernel/initramfs back
+rm -rf /boot.bak
+lvconvert --merge volgroup0/root_pre_update   # roll / back to the snapshot
+echo "Rollback scheduled; it is applied on reboot and the snapshot is removed automatically."
+read -rp "Reboot now? [y/N] " a
+[[ $a == [yY] ]] && reboot || exit 0
