@@ -993,45 +993,163 @@ windows lands in `/vmstore/share` owned by the user.
 
 ### 4.1 New install
 
-Nothing is passed through, virt-manager does everything:
+Nothing is passed through, so a linux vm is all virtio: paravirtual disk,
+network, video and file share, which is what makes it fast without giving it
+any hardware. The steps below are for a vm called `fedora`; change the name
+and the sizes, everything else is the same for every distro. The example
+sizes are 8 GiB of ram and 8 vcpus (4 cores with their 2 threads, half of the
+cpu) on a 40 GiB disk, plenty for a desktop and leaving the host and the
+windows vm room.
 
-1. `File > New Virtual Machine > Local install media`, pick the iso from the
-   `iso` pool (copy it to `/vmstore/iso` and `virsh pool-refresh iso` first).
-2. Memory and cpus as needed, for example `4096` and `4`.
-3. Storage: `Select or create custom storage > Manage`, pool `default`, `+`
-   to create a volume, format `qcow2`, size as needed. It lands in
-   `/vmstore/images/<name>.qcow2`.
-4. Name the vm, `Customize configuration before install`.
-5. In the customize window: `Overview` firmware `UEFI` (`OVMF_CODE.4m.fd`,
-   secure boot is only needed to test secure boot), chipset `Q35`. `CPUs`
-   model `host-passthrough`. Disk bus `VirtIO`, NIC model `virtio`. `Video`
-   model `Virtio` with `3D acceleration` and, in `Display Spice`, `OpenGL`
-   on, for a desktop that renders on the igpu.
-6. `Begin Installation`, then `vm-export` once installed.
-
-The same from the terminal ([virt-install](https://virt-manager.org/)):
+#### The iso
 
 ```bash
-virt-install --name fedora --memory 4096 --vcpus 4 --cpu host-passthrough \
-    --disk pool=default,size=40,format=qcow2,bus=virtio \
-    --cdrom /vmstore/iso/Fedora-Workstation-Live.iso \
-    --osinfo detect=on,require=off --boot uefi \
-    --graphics spice --video virtio
+mv ~/Downloads/Fedora-Workstation-Live-*.iso /vmstore/iso/
+virsh pool-refresh iso
 ```
 
-> The uefi variables of these vms stay in `/var/lib/libvirt/qemu/nvram/` on
-> the host, which is fine for test vms: after a reinstall the firmware boots
-> them through the fallback `\EFI\BOOT\BOOTX64.EFI` that most distros install,
-> and a distro that does not can be booted once from the firmware menu (`Boot
-> Manager`) to reinstall its bootloader. A vm worth more than that gets the
-> same `<nvram>/vmstore/nvram/<name>_VARS.fd</nvram>` line as the windows vm
-> before its install.
+#### Create the vm in virt-manager
 
-### 4.2 Reuse after a host reinstall
+`File > New Virtual Machine`:
 
-The disk is in `/vmstore/images`, the definition in `/vmstore/xml`, both
-referenced by absolute paths that are the same on the new host. See
-[5. After a host reinstall](#5-after-a-host-reinstall).
+1. `Local install media`, browse to the iso in the `iso` pool. If the
+   detection does not name the distro, untick `Automatically detect from the
+   installation media` and pick it, or the closest `Generic Linux`. The choice
+   only sets defaults.
+2. Memory `8192`, CPUs `8`.
+3. `Select or create custom storage > Manage`, pool `default`, `+` to create
+   a volume: name `fedora.qcow2`, format `qcow2`, capacity `40` GiB, leave
+   `Allocate entire volume now` off (the file grows as the vm uses it). It
+   lands in `/vmstore/images/fedora.qcow2`.
+4. Name `fedora`, tick `Customize configuration before install`, `Finish`.
+
+In the customize window, in this order:
+
+1. `Overview`: chipset `Q35`, firmware `UEFI x86_64:
+   /usr/share/edk2/x64/OVMF_CODE.4m.fd` (no secure boot, nothing needs it; the
+   `secboot` variant only when the distro's secure boot is what is being
+   tested). In its XML tab add, inside `<os>`:
+   ```xml
+   <nvram>/vmstore/nvram/fedora_VARS.fd</nvram>
+   ```
+   so that the boot entry of the distro survives a host reinstall like the
+   one of windows does.
+2. `CPUs`: untick `Copy host CPU configuration`, model `host-passthrough`,
+   `Topology > Manually set`: 1 socket, 4 cores, 2 threads. Then in its XML
+   tab replace the `<cpu>` element with:
+   ```xml
+   <cpu mode="host-passthrough" check="none" migratable="off">
+     <topology sockets="1" dies="1" clusters="1" cores="4" threads="2"/>
+     <cache mode="passthrough"/>
+     <feature policy="require" name="topoext"/>
+   </cpu>
+   ```
+   The guest then sees the real cache sizes and which vcpus are siblings, the
+   same reasons as for windows.
+3. `VirtIO Disk 1`: bus `VirtIO` (the default for a linux os), and in its XML
+   tab make the `<driver>` line:
+   ```xml
+   <driver name="qemu" type="qcow2" cache="none" io="native" discard="unmap"/>
+   ```
+   `cache="none"` with `io="native"` skips the host page cache, the guest has
+   its own; `discard="unmap"` passes trims through, so that `fstrim` inside
+   the guest shrinks the qcow2 file again
+   ([Arch wiki: virtio disk](https://wiki.archlinux.org/title/PCI_passthrough_via_OVMF#Virtio_disk)).
+4. `NIC`: device model `virtio`, network source `default`.
+5. `Display Spice`: listen type `None`, tick `OpenGL`, and pick the render
+   node of the igpu. `Video Virtio`: model `Virtio`, tick `3D acceleration`.
+   The desktop of the guest then renders on the igpu through virgl instead of
+   in software, which is the difference between a laggy and a smooth desktop
+   ([Arch wiki: QEMU guest graphics acceleration](https://wiki.archlinux.org/title/QEMU/Guest_graphics_acceleration#virgl)).
+   In the XML tab of the display the result is:
+   ```xml
+   <graphics type="spice">
+     <listen type="none"/>
+     <gl enable="yes" rendernode="/dev/dri/by-path/pci-0000:06:00.0-render"/>
+   </graphics>
+   ```
+   The render node is given by pci path on purpose: `renderD128`/`renderD129`
+   swap depending on whether the dgpu is on the host or in a vm, the path of
+   the igpu does not.
+6. `Sound ich9` stays, virt-manager wires it to spice, the viewer plays it.
+7. Remove `USB Redirector 1` and `2`. Keep the `Tablet`, it is what makes the
+   mouse move seamlessly between the viewer window and the host.
+8. The share of [3.4](#34-sharing-files-with-the-host), which linux mounts
+   natively. In the XML tab of `Overview` add after `<currentMemory>`:
+   ```xml
+   <memoryBacking>
+     <source type="memfd"/>
+     <access mode="shared"/>
+   </memoryBacking>
+   ```
+   and `Add Hardware > Filesystem`: driver `virtiofs`, source path
+   `/vmstore/share`, target path `share`.
+9. `Begin Installation`.
+
+
+#### If the distro hangs right after the grub menu (not tested)
+
+Debian, Fedora, Rocky and the rest of the RHEL family, live isos included,
+hang with a frozen viewer and one core at 100 % after choosing a grub entry.
+It is an open incompatibility between Arch's `edk2-ovmf` (202505 and newer)
+and the grub those distros patch
+([Arch wiki: QEMU troubleshooting](https://wiki.archlinux.org/title/QEMU/Troubleshooting#Linux_guest_boot_hangs_with_GRUB_in_UEFI_mode)).
+Fedora's build of the same firmware does not have it, and it installs next
+to Arch's, under `/usr/share/edk2/ovmf/`, without touching it:
+
+```bash
+yay -S edk2-ovmf-fedora
+```
+
+libvirt orders the firmware descriptions by file name and Fedora's sort
+before Arch's, so from then on the automatic `UEFI` choice of virt-manager
+and `--boot uefi` pick Fedora's firmware for every new vm, which is fine for
+any linux. For a vm that already exists, in `Overview` pick
+`/usr/share/edk2/ovmf/OVMF_CODE_4M.fd` in the firmware dropdown (its files
+are listed there once the package is in), or with `virt-install` replace
+`--boot uefi,...` by:
+
+```
+--boot loader=/usr/share/edk2/ovmf/OVMF_CODE_4M.fd,loader.readonly=yes,loader.type=pflash,nvram=/vmstore/nvram/fedora_VARS.fd,nvram.template=/usr/share/edk2/ovmf/OVMF_VARS_4M.fd
+```
+
+The windows vm keeps the firmware paths stored in its xml, it is not
+affected.
+
+#### Inside the guest (not tested)
+
+Right after the install, two packages and one mount:
+
+| Distro | Packages |
+|---|---|
+| Arch | `spice-vdagent qemu-guest-agent` |
+| Fedora | `spice-vdagent qemu-guest-agent` (Workstation has them already) |
+| Debian, Ubuntu | `spice-vdagent qemu-guest-agent` |
+
+- `spice-vdagent` gives clipboard sharing with the host and a desktop that
+  follows the size of the viewer window; `qemu-guest-agent` lets
+  `virsh shutdown` and virt-manager shut the vm down cleanly. Both start on
+  their own once installed (`systemctl enable --now qemu-guest-agent` where
+  the distro does not).
+- The share, in `/etc/fstab` of the guest:
+  ```
+  share  /mnt/share  virtiofs  defaults  0  0
+  ```
+  after `sudo mkdir /mnt/share`; the tag `share` is the `target` of step 8.
+  Files written from the guest belong to the guest's uid on the host, so a
+  guest user with uid 1000 matches the user on the host.
+- The 3d acceleration needs nothing, every current distro ships the virgl
+  driver in mesa; `glxinfo -B` inside the guest says `virgl`.
+
+Shut down, then `vm-export`.
+
+### 4.2 Reuse after a host reinstall (not tested)
+
+The disk is in `/vmstore/images`, the uefi variables in `/vmstore/nvram`
+and the definition in `/vmstore/xml`, all referenced by absolute paths that
+are the same on the new host. See
+[5. After a host reinstall](#5-after-a-host-reinstall). A vm created with
+Fedora's firmware needs `edk2-ovmf-fedora` on the new host too.
 
 ### 4.3 The dgpu in a linux vm
 
@@ -1054,7 +1172,7 @@ What survives on its own, given that the install of the new host leaves
 | Linux vm disks | `/vmstore/images/` |
 | Isos | `/vmstore/iso/` |
 | Files shared with the windows vm | `/vmstore/share/` |
-| Uefi variables of the windows vm | `/vmstore/nvram/win11_VARS.fd` |
+| Uefi variables of every vm | `/vmstore/nvram/<name>_VARS.fd` |
 | Tpm state of the windows vm | `/vmstore/tpm/win11/` |
 | Definitions of every vm | `/vmstore/xml/<name>.xml`, as long as `vm-export` ran after the last change |
 
@@ -1155,9 +1273,8 @@ start fails.
   landed in the modprobe file instead of the mkinitcpio one.
 - **A linux vm with grub hangs right after the grub menu** (Debian, Fedora,
   RHEL family and their live isos) with `edk2-ovmf` 202505 or newer. Known
-  Arch packaging issue; the workaround is the `edk2-ovmf-fedora` aur package
-  next to `edk2-ovmf` and that firmware in the `<loader>` of that vm
-  ([Arch wiki: QEMU troubleshooting](https://wiki.archlinux.org/title/QEMU/Troubleshooting#Linux_guest_boot_hangs_with_GRUB_in_UEFI_mode)).
+  Arch packaging issue; the workaround is Fedora's firmware, see
+  [4.1](#if-the-distro-hangs-right-after-the-grub-menu).
 - **Stutter in the windows vm.** Check the pinning is in place
   (`virsh vcpupin win11`), that `memballoon` is `none`, and that hyprland does
   not run something heavy on cpus 4 to 15 (`taskset` can keep it on `0-3`).
