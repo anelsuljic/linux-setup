@@ -92,3 +92,26 @@ des-vm-env()
     rm -f ~/.config/hypr/igpu-only
     echo -e "Log out and re-log in to apply changes."
 }
+
+# Python
+act-penv() {
+    local venv_name="$1"
+    local base_dir="$HOME/Documents/python-venvs"
+    local activate_script="$base_dir/$venv_name/bin/activate"
+
+    # Check if an argument was provided
+    if [ -z "$venv_name" ]; then
+        echo "Error: Virtual environment name is required."
+        echo "Usage: act-penv <name-venv>"
+        return 1
+    fi
+
+    # Check if the activation script exists
+    if [ -f "$activate_script" ]; then
+        source "$activate_script"
+        echo "Activated virtual environment: $venv_name"
+    else
+        echo "Error: Virtual environment '$venv_name' not found in $base_dir"
+        return 1
+    fi
+}
