@@ -1,0 +1,6 @@
+
+
+# -----------------------------------------------------
+# Load single customization file (if exists)
+# -----------------------------------------------------
+[[ -f ~/.bashrc_custom ]] && source ~/.bashrc_custom
