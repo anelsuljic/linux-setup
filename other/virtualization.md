@@ -1070,7 +1070,16 @@ In the customize window, in this order:
    ```
    The render node is given by pci path on purpose: `renderD128`/`renderD129`
    swap depending on whether the dgpu is on the host or in a vm, the path of
-   the igpu does not.
+   the igpu does not. In the XML tab of `Video Virtio`, add the resolution of
+   the panel to the model, otherwise the guest is never offered more than
+   1280x800, see
+   [the resolution of the panel](#the-resolution-of-the-panel-and-its-165-hz-not-tested):
+   ```xml
+   <model type="virtio" heads="1" primary="yes">
+     <acceleration accel3d="yes"/>
+     <resolution x="2560" y="1440"/>
+   </model>
+   ```
 6. `Sound ich9` stays, virt-manager wires it to spice, the viewer plays it.
 7. Remove `USB Redirector 1` and `2`. Keep the `Tablet`, it is what makes the
    mouse move seamlessly between the viewer window and the host.
@@ -1142,6 +1151,99 @@ Right after the install, two packages and one mount:
   driver in mesa; `glxinfo -B` inside the guest says `virgl`.
 
 Shut down, then `vm-export`.
+
+#### The resolution of the panel and its 165 Hz (not tested)
+
+The guest offers a list of modes that stops below the 2560x1440 of the panel,
+with 60 Hz as the only refresh rate, and virt-manager stretches that small
+desktop over the whole screen. Nothing is broken: there is no monitor behind
+the virtio display, so qemu writes the edid of the guest's screen itself. Its
+preferred mode is the `xres`/`yres` pair of the video device, 1280x800 by
+default; the rest of the list is the fixed set of standard timings the
+generator knows, and 2560x1440 is not one of them; and the refresh rate of the
+preferred mode is the one the ui reports to qemu, which spice does not report.
+On top of that virt-manager scales the console by default
+(`Scale Display > Always`) and does not resize the guest, so the mismatch is
+easy to miss.
+
+Three changes, one per layer.
+
+**1. The edid, in the vm xml.** With the vm off, `virsh edit fedora` (or the
+XML tab of `Video Virtio` in virt-manager), and add the resolution of the
+panel to the model:
+
+```xml
+<video>
+  <model type="virtio" heads="1" primary="yes">
+    <acceleration accel3d="yes"/>
+    <resolution x="2560" y="1440"/>
+  </model>
+</video>
+```
+
+libvirt hands it to qemu as `xres=2560,yres=1440`
+([libvirt: video devices](https://libvirt.org/formatdomain.html#video-devices)),
+which can be checked without starting the vm:
+
+```bash
+virsh domxml-to-native --format qemu-argv --domain fedora | tr ' ' '\n' | grep virtio-vga
+# {"driver":"virtio-vga-gl","id":"video0",...,"xres":2560,"yres":1440,...}
+```
+
+From there the guest comes up at 2560x1440, boot console and login screen
+included.
+
+**2. The refresh rate, on the kernel command line of the guest.** The edid
+generator of qemu does take a `refresh_rate` property, but only the plain
+`VGA` and `bochs-display` devices expose it (compare
+`qemu-system-x86_64 -device VGA,help` with `-device virtio-vga-gl,help`), and
+neither of them does 3d, which is a bad trade for a desktop. On
+`virtio-vga-gl` the rate can only come from the ui, and spice sends none, so
+the mode is added inside the guest instead, where the drm layer accepts modes
+the edid does not carry ([kernel: modedb](https://docs.kernel.org/fb/modedb.html)):
+
+```
+video=Virtual-1:2560x1440MR@165
+```
+
+`Virtual-1` is the connector of the virtio gpu (`ls /sys/class/drm` in the
+guest shows `card0-Virtual-1`), `M` computes the timings with cvt, `R` asks
+for reduced blanking so the pixel clock stays sane, `@165` is the rate. The
+timings are fiction, nothing drives a cable: what reaches the host is the
+resolution, and what the guest paces its compositor to is the rate. The kernel
+only adds the mode when the edid has none with the same resolution *and* rate,
+so 2560x1440 ends up in the list twice, at 60 Hz from the edid and at 165 Hz
+from here.
+
+Where the line goes depends on the boot loader of the guest: with grub it is
+`GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub` followed by
+`sudo grub-mkconfig -o /boot/grub/grub.cfg`, with systemd-boot the `options`
+line of `/boot/loader/entries/<entry>.conf`, with a unified kernel image
+`/etc/kernel/cmdline` and the rebuild of the image. After the reboot of the
+guest:
+
+```bash
+cat /sys/class/drm/card*-Virtual-1/modes | head     # 2560x1440 twice
+```
+
+**3. The viewer.** In virt-manager `View > Scale Display > Never` and
+`View > Fullscreen`, so that the console is shown pixel for pixel on the panel
+(`View > Resize to VM` does the same for a window). Leave `Auto resize VM with
+window` unchecked: with it on, the guest follows the size of the window, which
+regenerates the edid on every resize and throws the chosen mode away.
+
+The mode is then picked in the guest like on any machine: `Settings >
+Displays` on gnome, the display settings of kde, or
+`monitor=Virtual-1,2560x1440@165,0x0,1` in the hyprland config of a guest like
+omarchy. `hyprctl monitors`, `wlr-randr` or `xrandr` show what arrived.
+
+`vm-export` after the xml change.
+
+> The 165 Hz is what the guest believes and paces itself to, not a guarantee:
+> the frames still travel through virgl and spice to the client window, which
+> hyprland presents on the panel at its own 165 Hz. What it removes is the
+> 60 Hz ceiling inside the guest, which is what makes the desktop feel like
+> the one of the host.
 
 ### 4.2 Reuse after a host reinstall (not tested)
 
@@ -1275,6 +1377,14 @@ start fails.
   RHEL family and their live isos) with `edk2-ovmf` 202505 or newer. Known
   Arch packaging issue; the workaround is Fedora's firmware, see
   [4.1](#if-the-distro-hangs-right-after-the-grub-menu).
+- **A linux vm offers neither 2560x1440 nor 165 Hz.** The edid of the virtio
+  display is generated by qemu and knows neither: the `<resolution>` element
+  of the video model brings the resolution, a
+  `video=Virtual-1:2560x1440MR@165` on the kernel command line of the guest
+  brings the rate, see
+  [4.1](#the-resolution-of-the-panel-and-its-165-hz-not-tested). A guest
+  desktop that looks soft instead of small is virt-manager scaling it,
+  `View > Scale Display > Never`.
 - **Stutter in the windows vm.** Check the pinning is in place
   (`virsh vcpupin win11`), that `memballoon` is `none`, and that hyprland does
   not run something heavy on cpus 4 to 15 (`taskset` can keep it on `0-3`).
